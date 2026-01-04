@@ -5,8 +5,14 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
 
+from rest_framework.decorators import api_view, permission_classes
+
 from .providers.openmeteo import fetch_openmeteo
 
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def health(_request):
+    return Response({"status": "ok"})
 
 class WeatherView(APIView):
     permission_classes = [AllowAny]
