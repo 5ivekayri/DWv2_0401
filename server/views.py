@@ -1,21 +1,24 @@
-import os
+from __future__ import annotations
+
 import logging
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict
 from datetime import datetime, timezone
 
-from rest_framework.views import APIView
-from rest_framework.permissions import AllowAny
-from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
-from dataclasses import asdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
+from .weather.contracts import WeatherPoint
 from .weather.factory import build_weather_service
-from .weather.contracts import WeatherPoint  # поправь путь, если у тебя contracts лежит иначе
 
-log = logging.getLogger(__name__)
-
+log = logging.getLogger("weather.race")
 _service = build_weather_service()
+
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
@@ -26,11 +29,58 @@ def health(_request):
 class WeatherView(APIView):
     permission_classes = [AllowAny]
 
+    def _run_provider(self, provider, lat: float, lon: float, request_id: str):
+        provider_name = getattr(provider, "name", provider.__class__.__name__)
+        started = time.perf_counter()
+
+        log.info(
+            "provider_started request_id=%s provider=%s",
+            request_id,
+            provider_name,
+        )
+
+        try:
+            point = provider.get_weather(lat, lon)
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+
+            log.info(
+                "provider_succeeded request_id=%s provider=%s duration_ms=%s",
+                request_id,
+                provider_name,
+                duration_ms,
+            )
+
+            return {
+                "provider": provider_name,
+                "success": True,
+                "duration_ms": duration_ms,
+                "point": point,
+                "error": None,
+            }
+
+        except Exception as exc:
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+
+            log.warning(
+                "provider_failed request_id=%s provider=%s duration_ms=%s error_type=%s error=%s",
+                request_id,
+                provider_name,
+                duration_ms,
+                type(exc).__name__,
+                str(exc),
+            )
+
+            return {
+                "provider": provider_name,
+                "success": False,
+                "duration_ms": duration_ms,
+                "point": None,
+                "error": exc,
+            }
+
     def get(self, request):
-        testing = os.getenv("TESTING_MODE", "0") == "1"
         city = request.query_params.get("city")
 
-        # Единственная разрешенная заглушка
         if city == "test":
             point = WeatherPoint(
                 latitude=0.0,
@@ -46,46 +96,130 @@ class WeatherView(APIView):
             payload["observed_at"] = point.observed_at.isoformat().replace("+00:00", "Z")
             return Response(payload, status=200)
 
-        # Валидация координат
         try:
             lat = float(request.query_params["lat"])
             lon = float(request.query_params["lon"])
         except KeyError:
-            return Response({"detail": "lat and lon query parameters are required"}, status=400)
+            return Response(
+                {"detail": "lat and lon query parameters are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         except ValueError:
-            return Response({"detail": "lat and lon must be valid floating point numbers"}, status=400)
+            return Response(
+                {"detail": "lat and lon must be valid floating point numbers"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())[:8]
 
         providers = getattr(_service, "providers", None)
         if not providers:
-            return Response({"detail": "no providers configured"}, status=status.HTTP_502_BAD_GATEWAY)
+            log.error("no_providers_configured request_id=%s", request_id)
+            return Response(
+                {"detail": "no providers configured", "request_id": request_id},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
-        enabled = [p for p in providers if getattr(p, "is_enabled", lambda: True)()]
+        log.info(
+            "all_providers request_id=%s providers=%s",
+            request_id,
+            [getattr(p, "name", p.__class__.__name__) for p in providers],
+        )
+
+        enabled = []
+        for provider in providers:
+            provider_name = getattr(provider, "name", provider.__class__.__name__)
+
+            try:
+                is_enabled = getattr(provider, "is_enabled", lambda: True)()
+            except Exception as exc:
+                log.warning(
+                    "provider_enabled_check_failed request_id=%s provider=%s error_type=%s error=%s",
+                    request_id,
+                    provider_name,
+                    type(exc).__name__,
+                    str(exc),
+                )
+                is_enabled = False
+
+            log.info(
+                "provider_status request_id=%s provider=%s enabled=%s",
+                request_id,
+                provider_name,
+                is_enabled,
+            )
+
+            if is_enabled:
+                enabled.append(provider)
+
         if not enabled:
-            return Response({"detail": "no enabled providers (missing API keys?)"}, status=status.HTTP_502_BAD_GATEWAY)
+            log.error("no_enabled_providers request_id=%s", request_id)
+            return Response(
+                {"detail": "no enabled providers (missing API keys?)", "request_id": request_id},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
-        max_workers = min(getattr(_service, "max_workers", 4), len(enabled))
+        log.info(
+            "race_started request_id=%s providers=%s lat=%s lon=%s",
+            request_id,
+            [getattr(p, "name", p.__class__.__name__) for p in enabled],
+            lat,
+            lon,
+        )
+
+        race_started = time.perf_counter()
+        max_workers = min(len(enabled), 4)
+        results = []
         last_exc = None
 
-        # Race: кто быстрее дал валидный ответ — тот победил
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = {ex.submit(p.get_weather, lat, lon): p for p in enabled}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._run_provider, provider, lat, lon, request_id): provider
+                for provider in enabled
+            }
 
-            for fut in as_completed(futures):
-                provider = futures[fut]
-                name = getattr(provider, "name", provider.__class__.__name__)
-                try:
-                    point = fut.result()
-                    if testing:
-                        log.info("Weather selected provider=%s lat=%s lon=%s", name, lat, lon)
+            for future in as_completed(futures):
+                result = future.result()
+                results.append(result)
+
+                if result["success"]:
+                    total_race_ms = round((time.perf_counter() - race_started) * 1000, 2)
+                    point = result["point"]
+
+                    log.info(
+                        "race_winner_selected request_id=%s winner=%s winner_duration_ms=%s total_race_ms=%s",
+                        request_id,
+                        result["provider"],
+                        result["duration_ms"],
+                        total_race_ms,
+                    )
 
                     payload = asdict(point)
-                    payload["observed_at"] = point.observed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-                    return Response(payload, status=200)
+                    payload["observed_at"] = (
+                        point.observed_at.astimezone(timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
+                    payload["request_id"] = request_id
 
-                except Exception as exc:
-                    last_exc = exc
-                    if testing:
-                        log.warning("Provider failed name=%s error=%s", name, exc)
+                    return Response(payload, status=status.HTTP_200_OK)
 
-        # Если все провайдеры упали
-        return Response({"detail": f"all providers failed: {last_exc}"}, status=status.HTTP_502_BAD_GATEWAY)
+                last_exc = result["error"]
+
+        total_race_ms = round((time.perf_counter() - race_started) * 1000, 2)
+
+        log.error(
+            "race_failed request_id=%s total_race_ms=%s tried=%s last_error=%s",
+            request_id,
+            total_race_ms,
+            [r["provider"] for r in results],
+            str(last_exc),
+        )
+
+        return Response(
+            {
+                "detail": f"all providers failed: {last_exc}",
+                "request_id": request_id,
+            },
+            status=status.HTTP_502_BAD_GATEWAY,
+        )

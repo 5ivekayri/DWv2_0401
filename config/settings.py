@@ -14,12 +14,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 import os
 
-load_dotenv()
-
-
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 
+print("BASE_DIR =", BASE_DIR)
+print("ENV FILE =", BASE_DIR / ".env")
+print("OPENWEATHER_API_KEY present =", bool(os.getenv("OPENWEATHER_API_KEY", "").strip()))
+print("OPENWEATHER_API_KEY len =", len(os.getenv("OPENWEATHER_API_KEY", "").strip()))
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
@@ -127,3 +128,40 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {
+            "format": "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "standard",
+        },
+    },
+    "loggers": {
+        "weather.race": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "server.weather.providers.openmeteo": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "server.weather.providers.openweather": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "WARNING",
+    },
+}
