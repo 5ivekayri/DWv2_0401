@@ -13,9 +13,6 @@ from server.ai.prompts import (
 from server.models import AIOutfitRecommendation
 
 
-print("service.py fully loaded")
-
-
 class OutfitRecommendationService:
     def __init__(self) -> None:
         self.client = OpenRouterClient()
