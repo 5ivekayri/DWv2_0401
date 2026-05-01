@@ -17,6 +17,12 @@ from rest_framework.views import APIView
 from server.ai.service import OutfitRecommendationService
 from .weather.contracts import WeatherPoint
 from .weather.factory import build_weather_service
+from .weather.storage import (
+    get_cached_weather_payload,
+    get_hour_bucket,
+    get_stored_weather_payload,
+    store_weather_point,
+)
 
 log = logging.getLogger("weather.race")
 _service = build_weather_service()
@@ -113,6 +119,43 @@ class WeatherView(APIView):
             )
 
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())[:8]
+        hour_bucket = get_hour_bucket()
+
+        cached_payload = get_cached_weather_payload(
+            latitude=lat,
+            longitude=lon,
+            hour_bucket=hour_bucket,
+        )
+        if cached_payload:
+            payload = dict(cached_payload)
+            payload["request_id"] = request_id
+            payload["cache_status"] = "redis_hit"
+            log.info(
+                "weather_cache_hit request_id=%s layer=redis lat=%s lon=%s hour_bucket=%s",
+                request_id,
+                lat,
+                lon,
+                hour_bucket.isoformat(),
+            )
+            return Response(payload, status=status.HTTP_200_OK)
+
+        stored_payload = get_stored_weather_payload(
+            latitude=lat,
+            longitude=lon,
+            hour_bucket=hour_bucket,
+        )
+        if stored_payload:
+            payload = dict(stored_payload)
+            payload["request_id"] = request_id
+            payload["cache_status"] = "mysql_hit"
+            log.info(
+                "weather_cache_hit request_id=%s layer=mysql lat=%s lon=%s hour_bucket=%s",
+                request_id,
+                lat,
+                lon,
+                hour_bucket.isoformat(),
+            )
+            return Response(payload, status=status.HTTP_200_OK)
 
         providers = getattr(_service, "providers", None)
         if not providers:
@@ -196,13 +239,13 @@ class WeatherView(APIView):
                         total_race_ms,
                     )
 
-                    payload = asdict(point)
-                    payload["observed_at"] = (
-                        point.observed_at.astimezone(timezone.utc)
-                        .isoformat()
-                        .replace("+00:00", "Z")
+                    payload = store_weather_point(
+                        point=point,
+                        city=city,
+                        hour_bucket=hour_bucket,
                     )
                     payload["request_id"] = request_id
+                    payload["cache_status"] = "miss_stored"
 
                     return Response(payload, status=status.HTTP_200_OK)
 
