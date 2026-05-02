@@ -8,19 +8,28 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timezone
 
+from django.conf import settings
+from django.utils import timezone as django_timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from server.ai.service import OutfitRecommendationService
+from server.models import WeatherHourlySnapshot, WeatherStationReading
 from .weather.contracts import WeatherPoint
 from .weather.factory import build_weather_service
+from .weather.geocoding import geocode_city
 from .weather.storage import (
     get_cached_weather_payload,
     get_hour_bucket,
     get_stored_weather_payload,
+    normalize_coordinate,
+    snapshot_to_payload,
+    station_reading_to_payload,
+    store_station_reading_snapshot,
     store_weather_point,
 )
 
@@ -32,6 +41,50 @@ _service = build_weather_service()
 @permission_classes([AllowAny])
 def health(_request):
     return Response({"status": "ok"})
+
+
+class GeocodeView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        city = str(request.query_params.get("city") or request.query_params.get("q") or "").strip()
+        if not city:
+            return Response(
+                {"detail": "city query parameter is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            limit = min(max(int(request.query_params.get("limit", 5)), 1), 10)
+        except ValueError:
+            return Response(
+                {"detail": "limit must be an integer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        language = str(request.query_params.get("language", "ru")).strip() or "ru"
+
+        try:
+            results = geocode_city(city=city, limit=limit, language=language)
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else 502
+            return Response(
+                {"detail": f"geocoding provider HTTP error: {status_code}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except requests.RequestException:
+            return Response(
+                {"detail": "geocoding provider unavailable"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        if not results:
+            return Response(
+                {"detail": "city not found", "query": city, "results": []},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response({"query": city, "results": results}, status=status.HTTP_200_OK)
 
 
 class WeatherView(APIView):
@@ -243,6 +296,8 @@ class WeatherView(APIView):
                         point=point,
                         city=city,
                         hour_bucket=hour_bucket,
+                        latitude=lat,
+                        longitude=lon,
                     )
                     payload["request_id"] = request_id
                     payload["cache_status"] = "miss_stored"
@@ -335,5 +390,154 @@ class AIOutfitRecommendationView(APIView):
                 "model": obj.model_name,
                 "source": "db" if not created else "openrouter",
             },
+            status=status.HTTP_200_OK,
+        )
+
+
+class WeatherHistoryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            lat = normalize_coordinate(float(request.query_params["lat"]))
+            lon = normalize_coordinate(float(request.query_params["lon"]))
+        except KeyError:
+            return Response(
+                {"detail": "lat and lon query parameters are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except ValueError:
+            return Response(
+                {"detail": "lat and lon must be valid floating point numbers"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            limit = min(max(int(request.query_params.get("limit", 24)), 1), 168)
+        except ValueError:
+            return Response(
+                {"detail": "limit must be an integer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        snapshots = (
+            WeatherHourlySnapshot.objects
+            .filter(
+                latitude=lat,
+                longitude=lon,
+                data_source=WeatherHourlySnapshot.SOURCE_EXTERNAL_API,
+            )
+            .order_by("-hour_bucket")[:limit]
+        )
+
+        data = []
+        for snapshot in reversed(list(snapshots)):
+            payload = snapshot_to_payload(snapshot)
+            payload["hour_bucket"] = snapshot.hour_bucket.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            payload["data_source"] = snapshot.data_source
+            data.append(payload)
+
+        return Response({"results": data}, status=status.HTTP_200_OK)
+
+
+class StationReadingIngestView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        configured_key = getattr(settings, "STATION_API_KEY", "")
+        if configured_key and request.headers.get("X-Station-Key") != configured_key:
+            return Response({"detail": "invalid station key"}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            station_id = str(request.data.get("station_id", "arduino-1")).strip() or "arduino-1"
+            temperature_c = float(request.data["temperature_c"])
+            humidity = self._optional_float(request.data.get("humidity"))
+            pressure_hpa = self._optional_float(request.data.get("pressure_hpa"))
+            wind_speed_ms = float(request.data.get("wind_speed_ms", 0.0))
+            precipitation_mm = float(request.data.get("precipitation_mm", 0.0))
+            latitude = self._optional_float(request.data.get("latitude"))
+            longitude = self._optional_float(request.data.get("longitude"))
+            observed_at = self._parse_observed_at(request.data.get("observed_at"))
+        except KeyError as exc:
+            return Response(
+                {"detail": f"missing required field: {exc.args[0]}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "invalid station payload"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        reading = WeatherStationReading.objects.create(
+            station_id=station_id,
+            latitude=latitude,
+            longitude=longitude,
+            temperature_c=temperature_c,
+            humidity=humidity,
+            pressure_hpa=pressure_hpa,
+            wind_speed_ms=wind_speed_ms,
+            precipitation_mm=precipitation_mm,
+            observed_at=observed_at,
+            raw_payload=dict(request.data),
+        )
+        store_station_reading_snapshot(reading)
+
+        return Response(station_reading_to_payload(reading), status=status.HTTP_201_CREATED)
+
+    @staticmethod
+    def _optional_float(value):
+        if value in (None, ""):
+            return None
+        return float(value)
+
+    @staticmethod
+    def _parse_observed_at(value):
+        if not value:
+            return django_timezone.now()
+        parsed = parse_datetime(str(value))
+        if parsed is None:
+            raise ValueError("invalid observed_at")
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+
+class StationLatestView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        station_id = request.query_params.get("station_id", "arduino-1")
+        reading = (
+            WeatherStationReading.objects
+            .filter(station_id=station_id)
+            .order_by("-observed_at", "-created_at")
+            .first()
+        )
+        if not reading:
+            return Response({"detail": "station reading not found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(station_reading_to_payload(reading), status=status.HTTP_200_OK)
+
+
+class StationHistoryView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        station_id = request.query_params.get("station_id", "arduino-1")
+        try:
+            limit = min(max(int(request.query_params.get("limit", 100)), 1), 1000)
+        except ValueError:
+            return Response(
+                {"detail": "limit must be an integer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        readings = (
+            WeatherStationReading.objects
+            .filter(station_id=station_id)
+            .order_by("-observed_at", "-created_at")[:limit]
+        )
+        return Response(
+            {"results": [station_reading_to_payload(reading) for reading in reversed(list(readings))]},
             status=status.HTTP_200_OK,
         )

@@ -8,7 +8,7 @@ from django.core.cache import cache
 from django.core.cache.backends.base import InvalidCacheBackendError
 from django.db import DatabaseError
 
-from server.models import WeatherHourlySnapshot
+from server.models import WeatherHourlySnapshot, WeatherStationReading
 from server.weather.contracts import WeatherPoint
 
 
@@ -116,9 +116,11 @@ def store_weather_point(
     city: str | None,
     hour_bucket: datetime,
     data_source: str = WeatherHourlySnapshot.SOURCE_EXTERNAL_API,
+    latitude: float | None = None,
+    longitude: float | None = None,
 ) -> dict:
-    lat = normalize_coordinate(point.latitude)
-    lon = normalize_coordinate(point.longitude)
+    lat = normalize_coordinate(point.latitude if latitude is None else latitude)
+    lon = normalize_coordinate(point.longitude if longitude is None else longitude)
     payload = point_to_payload(point)
 
     WeatherHourlySnapshot.objects.update_or_create(
@@ -139,3 +141,47 @@ def store_weather_point(
     )
     set_cached_weather_payload(latitude=lat, longitude=lon, hour_bucket=hour_bucket, payload=payload)
     return payload
+
+
+def station_reading_to_payload(reading: WeatherStationReading) -> dict:
+    return {
+        "id": reading.id,
+        "station_id": reading.station_id,
+        "latitude": reading.latitude,
+        "longitude": reading.longitude,
+        "temperature_c": reading.temperature_c,
+        "humidity": reading.humidity,
+        "pressure_hpa": reading.pressure_hpa,
+        "wind_speed_ms": reading.wind_speed_ms,
+        "precipitation_mm": reading.precipitation_mm,
+        "observed_at": reading.observed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "source": "arduino",
+        "data_source": WeatherHourlySnapshot.SOURCE_IOT_MQTT,
+    }
+
+
+def store_station_reading_snapshot(reading: WeatherStationReading) -> None:
+    if reading.latitude is None or reading.longitude is None:
+        return
+
+    lat = normalize_coordinate(reading.latitude)
+    lon = normalize_coordinate(reading.longitude)
+    hour_bucket = get_hour_bucket(reading.observed_at)
+    payload = station_reading_to_payload(reading)
+
+    WeatherHourlySnapshot.objects.update_or_create(
+        latitude=lat,
+        longitude=lon,
+        hour_bucket=hour_bucket,
+        data_source=WeatherHourlySnapshot.SOURCE_IOT_MQTT,
+        defaults={
+            "city": "",
+            "temperature_c": reading.temperature_c,
+            "pressure_hpa": reading.pressure_hpa,
+            "wind_speed_ms": reading.wind_speed_ms,
+            "precipitation_mm": reading.precipitation_mm,
+            "observed_at": reading.observed_at,
+            "provider": "arduino",
+            "raw_payload": payload,
+        },
+    )

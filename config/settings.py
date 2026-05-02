@@ -147,6 +147,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 WEATHER_CACHE_TTL_SECONDS = int(os.getenv("WEATHER_CACHE_TTL_SECONDS", "3600"))
+STATION_API_KEY = os.getenv("STATION_API_KEY", "").strip()
 
 if REDIS_URL:
     CACHES = {

@@ -14,3 +14,7 @@ db.sqlite3
 *.log
 media/
 staticfiles/
+
+# frontend
+node_modules/
+dist/

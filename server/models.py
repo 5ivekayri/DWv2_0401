@@ -75,3 +75,28 @@ class WeatherHourlySnapshot(models.Model):
 
     def __str__(self) -> str:
         return f"{self.data_source}:{self.latitude},{self.longitude} @ {self.hour_bucket.isoformat()}"
+
+
+class WeatherStationReading(models.Model):
+    station_id = models.CharField(max_length=64, db_index=True, default="arduino-1")
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
+
+    temperature_c = models.FloatField()
+    humidity = models.FloatField(null=True, blank=True)
+    pressure_hpa = models.FloatField(null=True, blank=True)
+    wind_speed_ms = models.FloatField(default=0.0)
+    precipitation_mm = models.FloatField(default=0.0)
+
+    observed_at = models.DateTimeField(db_index=True)
+    raw_payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-observed_at", "-created_at"]
+        indexes = [
+            models.Index(fields=["station_id", "observed_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.station_id} @ {self.observed_at.isoformat()}"
