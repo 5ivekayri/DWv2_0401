@@ -30,4 +30,24 @@ class UserRegisterSerializer(serializers.ModelSerializer):
 
 
 class CustomTokenSerializer(TokenObtainPairSerializer):
-    pass
+    username = serializers.CharField(required=False)
+    identifier = serializers.CharField(required=False, write_only=True)
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.fields[self.username_field].required = False
+
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        identifier = str(attrs.pop("identifier", "")).strip()
+        if identifier and not attrs.get(self.username_field):
+            attrs[self.username_field] = identifier
+
+        if not attrs.get(self.username_field):
+            raise serializers.ValidationError({self.username_field: "This field is required."})
+
+        username = str(attrs.get(self.username_field, "")).strip()
+        if "@" in username:
+            user = User.objects.filter(email__iexact=username).only("username").first()
+            if user:
+                attrs[self.username_field] = user.username
+        return super().validate(attrs)

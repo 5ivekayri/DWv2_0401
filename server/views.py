@@ -15,7 +15,9 @@ from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework import serializers
 from rest_framework.views import APIView
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, OpenApiTypes, extend_schema, inline_serializer
 
 from server.ai.service import OutfitRecommendationService
 from server.models import WeatherHourlySnapshot, WeatherStationReading
@@ -34,9 +36,50 @@ from .weather.storage import (
 )
 
 log = logging.getLogger("weather.race")
+api_log = logging.getLogger("server.api")
 _service = build_weather_service()
 
 
+AI_OUTFIT_REQUEST_SCHEMA = inline_serializer(
+    name="AIOutfitRecommendationRequest",
+    fields={
+        "city": serializers.CharField(),
+        "temperature_c": serializers.FloatField(),
+        "humidity": serializers.FloatField(),
+        "wind_speed_ms": serializers.FloatField(),
+        "precipitation_mm": serializers.FloatField(),
+        "condition": serializers.CharField(required=False, allow_blank=True),
+    },
+)
+
+AI_OUTFIT_RESPONSE_SCHEMA = inline_serializer(
+    name="AIOutfitRecommendationResponse",
+    fields={
+        "city": serializers.CharField(),
+        "hour_bucket": serializers.CharField(),
+        "recommendation": serializers.CharField(),
+        "model": serializers.CharField(),
+        "source": serializers.CharField(),
+    },
+)
+
+STATION_READING_REQUEST_SCHEMA = inline_serializer(
+    name="StationReadingRequest",
+    fields={
+        "station_id": serializers.CharField(required=False),
+        "latitude": serializers.FloatField(required=False),
+        "longitude": serializers.FloatField(required=False),
+        "temperature_c": serializers.FloatField(),
+        "humidity": serializers.FloatField(required=False),
+        "pressure_hpa": serializers.FloatField(required=False),
+        "wind_speed_ms": serializers.FloatField(required=False),
+        "precipitation_mm": serializers.FloatField(required=False),
+        "observed_at": serializers.CharField(required=False),
+    },
+)
+
+
+@extend_schema(responses={200: OpenApiResponse(description="Service health status")})
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def health(_request):
@@ -46,9 +89,18 @@ def health(_request):
 class GeocodeView(APIView):
     permission_classes = [AllowAny]
 
+    @extend_schema(
+        parameters=[
+            OpenApiParameter("city", OpenApiTypes.STR, OpenApiParameter.QUERY, required=True),
+            OpenApiParameter("limit", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False),
+            OpenApiParameter("language", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False),
+        ],
+        responses={200: OpenApiResponse(description="Geocoding results")},
+    )
     def get(self, request):
         city = str(request.query_params.get("city") or request.query_params.get("q") or "").strip()
         if not city:
+            api_log.warning("geocode_rejected reason=missing_city")
             return Response(
                 {"detail": "city query parameter is required"},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -57,33 +109,45 @@ class GeocodeView(APIView):
         try:
             limit = min(max(int(request.query_params.get("limit", 5)), 1), 10)
         except ValueError:
+            api_log.warning("geocode_rejected city=%s reason=bad_limit", city)
             return Response(
                 {"detail": "limit must be an integer"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         language = str(request.query_params.get("language", "ru")).strip() or "ru"
+        started = time.perf_counter()
+        api_log.info("geocode_started city=%s limit=%s language=%s", city, limit, language)
 
         try:
             results = geocode_city(city=city, limit=limit, language=language)
         except requests.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else 502
+            api_log.warning("geocode_failed city=%s error_type=http status=%s", city, status_code)
             return Response(
                 {"detail": f"geocoding provider HTTP error: {status_code}"},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         except requests.RequestException:
+            api_log.warning("geocode_failed city=%s error_type=request_exception", city)
             return Response(
                 {"detail": "geocoding provider unavailable"},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
         if not results:
+            api_log.info("geocode_not_found city=%s duration_ms=%s", city, round((time.perf_counter() - started) * 1000, 2))
             return Response(
                 {"detail": "city not found", "query": city, "results": []},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        api_log.info(
+            "geocode_succeeded city=%s results=%s duration_ms=%s",
+            city,
+            len(results),
+            round((time.perf_counter() - started) * 1000, 2),
+        )
         return Response({"query": city, "results": results}, status=status.HTTP_200_OK)
 
 
@@ -139,6 +203,14 @@ class WeatherView(APIView):
                 "error": exc,
             }
 
+    @extend_schema(
+        parameters=[
+            OpenApiParameter("lat", OpenApiTypes.FLOAT, OpenApiParameter.QUERY, required=True),
+            OpenApiParameter("lon", OpenApiTypes.FLOAT, OpenApiParameter.QUERY, required=True),
+            OpenApiParameter("city", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False),
+        ],
+        responses={200: OpenApiResponse(description="Current weather payload")},
+    )
     def get(self, request):
         city = request.query_params.get("city")
 
@@ -173,6 +245,7 @@ class WeatherView(APIView):
 
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())[:8]
         hour_bucket = get_hour_bucket()
+        api_log.info("weather_request_started request_id=%s lat=%s lon=%s city=%s", request_id, lat, lon, city or "")
 
         cached_payload = get_cached_weather_payload(
             latitude=lat,
@@ -190,6 +263,7 @@ class WeatherView(APIView):
                 lon,
                 hour_bucket.isoformat(),
             )
+            api_log.info("weather_response_ready request_id=%s status=200 cache_status=redis_hit source=%s", request_id, payload.get("source"))
             return Response(payload, status=status.HTTP_200_OK)
 
         stored_payload = get_stored_weather_payload(
@@ -208,6 +282,7 @@ class WeatherView(APIView):
                 lon,
                 hour_bucket.isoformat(),
             )
+            api_log.info("weather_response_ready request_id=%s status=200 cache_status=mysql_hit source=%s", request_id, payload.get("source"))
             return Response(payload, status=status.HTTP_200_OK)
 
         providers = getattr(_service, "providers", None)
@@ -302,6 +377,7 @@ class WeatherView(APIView):
                     payload["request_id"] = request_id
                     payload["cache_status"] = "miss_stored"
 
+                    api_log.info("weather_response_ready request_id=%s status=200 cache_status=miss_stored source=%s", request_id, payload.get("source"))
                     return Response(payload, status=status.HTTP_200_OK)
 
                 last_exc = result["error"]
@@ -328,6 +404,10 @@ class WeatherView(APIView):
 class AIOutfitRecommendationView(APIView):
     permission_classes = [AllowAny]
 
+    @extend_schema(
+        request=AI_OUTFIT_REQUEST_SCHEMA,
+        responses={200: AI_OUTFIT_RESPONSE_SCHEMA},
+    )
     def post(self, request):
         try:
             city = str(request.data["city"]).strip()
@@ -348,14 +428,23 @@ class AIOutfitRecommendationView(APIView):
             )
 
         if not city:
+            api_log.warning("ai_outfit_rejected reason=empty_city")
             return Response(
                 {"detail": "city must not be empty"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         service = OutfitRecommendationService()
+        api_log.info(
+            "ai_outfit_started city=%s temperature_c=%s wind_speed_ms=%s precipitation_mm=%s",
+            city,
+            temperature_c,
+            wind_speed_ms,
+            precipitation_mm,
+        )
 
         if not service.client.is_enabled():
+            api_log.warning("ai_outfit_unavailable city=%s reason=not_configured", city)
             return Response(
                 {"detail": "AI service is not configured"},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -372,16 +461,19 @@ class AIOutfitRecommendationView(APIView):
             )
         except requests.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else 502
+            api_log.warning("ai_outfit_failed city=%s error_type=http status=%s", city, status_code)
             return Response(
                 {"detail": f"OpenRouter HTTP error: {status_code}"},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         except Exception as exc:
+            api_log.warning("ai_outfit_failed city=%s error_type=%s", city, type(exc).__name__)
             return Response(
                 {"detail": f"AI recommendation service unavailable: {type(exc).__name__}"},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
+        api_log.info("ai_outfit_succeeded city=%s source=%s", city, "openrouter" if created else "db")
         return Response(
             {
                 "city": obj.city,
@@ -397,6 +489,14 @@ class AIOutfitRecommendationView(APIView):
 class WeatherHistoryView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        parameters=[
+            OpenApiParameter("lat", OpenApiTypes.FLOAT, OpenApiParameter.QUERY, required=True),
+            OpenApiParameter("lon", OpenApiTypes.FLOAT, OpenApiParameter.QUERY, required=True),
+            OpenApiParameter("limit", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False),
+        ],
+        responses={200: OpenApiResponse(description="Hourly weather history")},
+    )
     def get(self, request):
         try:
             lat = normalize_coordinate(float(request.query_params["lat"]))
@@ -437,15 +537,28 @@ class WeatherHistoryView(APIView):
             payload["data_source"] = snapshot.data_source
             data.append(payload)
 
+        api_log.info(
+            "weather_history_succeeded user_id=%s lat=%s lon=%s limit=%s results=%s",
+            request.user.pk,
+            lat,
+            lon,
+            limit,
+            len(data),
+        )
         return Response({"results": data}, status=status.HTTP_200_OK)
 
 
 class StationReadingIngestView(APIView):
     permission_classes = [AllowAny]
 
+    @extend_schema(
+        request=STATION_READING_REQUEST_SCHEMA,
+        responses={201: OpenApiResponse(description="Created station reading")},
+    )
     def post(self, request):
         configured_key = getattr(settings, "STATION_API_KEY", "")
         if configured_key and request.headers.get("X-Station-Key") != configured_key:
+            api_log.warning("station_ingest_rejected reason=invalid_key")
             return Response({"detail": "invalid station key"}, status=status.HTTP_403_FORBIDDEN)
 
         try:
@@ -483,6 +596,7 @@ class StationReadingIngestView(APIView):
         )
         store_station_reading_snapshot(reading)
 
+        api_log.info("station_ingest_succeeded station_id=%s reading_id=%s", reading.station_id, reading.pk)
         return Response(station_reading_to_payload(reading), status=status.HTTP_201_CREATED)
 
     @staticmethod
@@ -506,6 +620,10 @@ class StationReadingIngestView(APIView):
 class StationLatestView(APIView):
     permission_classes = [AllowAny]
 
+    @extend_schema(
+        parameters=[OpenApiParameter("station_id", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False)],
+        responses={200: OpenApiResponse(description="Latest station reading")},
+    )
     def get(self, request):
         station_id = request.query_params.get("station_id", "arduino-1")
         reading = (
@@ -515,13 +633,22 @@ class StationLatestView(APIView):
             .first()
         )
         if not reading:
+            api_log.info("station_latest_not_found station_id=%s", station_id)
             return Response({"detail": "station reading not found"}, status=status.HTTP_404_NOT_FOUND)
+        api_log.info("station_latest_succeeded station_id=%s reading_id=%s", station_id, reading.pk)
         return Response(station_reading_to_payload(reading), status=status.HTTP_200_OK)
 
 
 class StationHistoryView(APIView):
     permission_classes = [AllowAny]
 
+    @extend_schema(
+        parameters=[
+            OpenApiParameter("station_id", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False),
+            OpenApiParameter("limit", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False),
+        ],
+        responses={200: OpenApiResponse(description="Station readings history")},
+    )
     def get(self, request):
         station_id = request.query_params.get("station_id", "arduino-1")
         try:
@@ -537,7 +664,9 @@ class StationHistoryView(APIView):
             .filter(station_id=station_id)
             .order_by("-observed_at", "-created_at")[:limit]
         )
+        data = [station_reading_to_payload(reading) for reading in reversed(list(readings))]
+        api_log.info("station_history_succeeded station_id=%s limit=%s results=%s", station_id, limit, len(data))
         return Response(
-            {"results": [station_reading_to_payload(reading) for reading in reversed(list(readings))]},
+            {"results": data},
             status=status.HTTP_200_OK,
         )

@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'rest_framework_simplejwt',
+    'drf_spectacular',
     'access',
     'server',
 ]
@@ -172,6 +173,15 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+}
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "DWv2 Weather API",
+    "DESCRIPTION": "Weather, AI outfit, auth and Arduino station endpoints.",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "SCHEMA_PATH_PREFIX": "/api",
 }
 
 SIMPLE_JWT = {
@@ -209,6 +219,16 @@ LOGGING = {
             "propagate": False,
         },
         "server.weather.providers.openweather": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "server.api": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "access.api": {
             "handlers": ["console"],
             "level": "INFO",
             "propagate": False,

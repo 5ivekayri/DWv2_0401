@@ -35,6 +35,12 @@ const DEFAULT_COORDS = {
 };
 
 const THEME_KEY = "dwv2_theme";
+const DEBUG_UI = import.meta.env.DEV || localStorage.getItem("dwv2_debug_ui") === "1";
+
+function logUi(event, details = {}) {
+  if (!DEBUG_UI) return;
+  console.info(`[dwv2:ui] ${event}`, details);
+}
 
 function getInitialTheme() {
   const saved = localStorage.getItem(THEME_KEY);
@@ -135,11 +141,14 @@ function App() {
   async function runTask(key, task) {
     setLoading((current) => ({ ...current, [key]: true }));
     setNotice("");
+    logUi("task_started", { key });
     try {
       await task();
     } catch (error) {
+      console.error(`[dwv2:ui] task_failed:${key}`, error);
       setNotice(getErrorMessage(error));
     } finally {
+      logUi("task_finished", { key });
       setLoading((current) => ({ ...current, [key]: false }));
     }
   }
@@ -207,6 +216,7 @@ function App() {
 
   async function resolveCity() {
     if (!coords.city.trim()) return coords;
+    logUi("geocode_started", { city: coords.city.trim() });
     const place = await geocodeCity(coords.city.trim());
     const nextCoords = {
       city: place.city,
@@ -214,6 +224,7 @@ function App() {
       lon: String(place.longitude),
     };
     setCoords(nextCoords);
+    logUi("geocode_finished", nextCoords);
     return nextCoords;
   }
 
@@ -221,8 +232,15 @@ function App() {
     await runTask("weather", async () => {
       const target = searchMode === "city" ? await resolveCity() : nextCoords;
       const params = new URLSearchParams({ lat: target.lat, lon: target.lon });
+      logUi("weather_load_started", { target, authenticated: Boolean(nextTokens?.access) });
       const current = await apiRequest(`/weather?${params}`);
       setWeather(current);
+      logUi("weather_current_loaded", {
+        source: current.source,
+        cache_status: current.cache_status,
+        observed_at: current.observed_at,
+        temperature_c: current.temperature_c,
+      });
 
       const condition = current.precipitation_mm > 0 ? "rain" : "cloudy";
       apiRequest("/ai/outfit-recommendation", {
@@ -237,7 +255,10 @@ function App() {
         }),
       })
         .then(setOutfit)
-        .catch((error) => setOutfit({ recommendation: getErrorMessage(error), source: "unavailable" }));
+        .catch((error) => {
+          console.error("[dwv2:ui] outfit_failed", error);
+          setOutfit({ recommendation: getErrorMessage(error), source: "unavailable" });
+        });
 
       await loadWeatherHistory(params, nextTokens);
     });
@@ -252,8 +273,10 @@ function App() {
     try {
       const history = await apiRequest(`/weather/history?${params}&limit=24`, {}, nextTokens);
       setWeatherHistory(history.results || []);
+      logUi("weather_history_loaded", { results: history.results?.length || 0 });
     } catch (error) {
       setWeatherHistory([]);
+      console.error("[dwv2:ui] weather_history_failed", error);
       if (error.status === 401) {
         clearTokens();
         setTokens(null);
@@ -268,13 +291,16 @@ function App() {
       const params = new URLSearchParams({ station_id: stationId });
       const history = await apiRequest(`/station/history?${params}&limit=100`);
       setStationHistory(history.results || []);
+      logUi("station_history_loaded", { stationId, results: history.results?.length || 0 });
 
       try {
         const latest = await apiRequest(`/station/latest?${params}`);
         setStationLatest(latest);
+        logUi("station_latest_loaded", { stationId, readingId: latest.id });
       } catch (error) {
         if (error.status === 404) {
           setStationLatest(null);
+          logUi("station_latest_empty", { stationId });
           return;
         }
         throw error;

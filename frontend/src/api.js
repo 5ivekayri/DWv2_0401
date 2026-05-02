@@ -1,5 +1,11 @@
 const API_PREFIX = "/api";
 const TOKEN_KEY = "dwv2_tokens";
+const DEBUG_API = import.meta.env.DEV || localStorage.getItem("dwv2_debug_api") === "1";
+
+function logApi(event, details = {}) {
+  if (!DEBUG_API) return;
+  console.info(`[dwv2:api] ${event}`, details);
+}
 
 export function readTokens() {
   try {
@@ -19,7 +25,18 @@ export function clearTokens() {
 
 async function parseResponse(response) {
   const text = await response.text();
-  const payload = text ? JSON.parse(text) : {};
+  let payload = {};
+
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch (error) {
+    console.error("[dwv2:api] response_json_parse_failed", {
+      status: response.status,
+      url: response.url,
+      bodyPreview: text.slice(0, 300),
+    });
+    throw error;
+  }
 
   if (!response.ok) {
     const message = payload.detail || payload.error || `HTTP ${response.status}`;
@@ -33,6 +50,9 @@ async function parseResponse(response) {
 }
 
 export async function apiRequest(path, options = {}, tokens = null) {
+  const method = options.method || "GET";
+  logApi("request_started", { method, path, authenticated: Boolean(tokens?.access) });
+
   const headers = {
     "Content-Type": "application/json",
     ...(options.headers || {}),
@@ -47,7 +67,14 @@ export async function apiRequest(path, options = {}, tokens = null) {
     headers,
   });
 
-  return parseResponse(response);
+  const payload = await parseResponse(response);
+  logApi("request_finished", {
+    method,
+    path,
+    status: response.status,
+    keys: Object.keys(payload),
+  });
+  return payload;
 }
 
 export async function login(username, password) {
@@ -72,14 +99,7 @@ export async function refreshAccess(refresh) {
 }
 
 export async function geocodeCity(city) {
-  const url = new URL("https://geocoding-api.open-meteo.com/v1/search");
-  url.searchParams.set("name", city);
-  url.searchParams.set("count", "1");
-  url.searchParams.set("language", "ru");
-  url.searchParams.set("format", "json");
-
-  const response = await fetch(url);
-  const payload = await parseResponse(response);
+  const payload = await apiRequest(`/geocode?city=${encodeURIComponent(city)}&limit=1`);
   const place = payload.results?.[0];
 
   if (!place) {
