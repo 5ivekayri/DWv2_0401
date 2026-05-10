@@ -59,3 +59,17 @@ class AuthApiTests(TestCase):
 
         self.assertEqual(duplicate.status_code, 400)
         self.assertIn("email", duplicate.data)
+
+    def test_register_alias_creates_user(self):
+        response = self.client.post(
+            "/api/auth/register/",
+            {
+                "username": "register_alias_user",
+                "email": "register-alias@example.com",
+                "password": "password123",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["username"], "register_alias_user")

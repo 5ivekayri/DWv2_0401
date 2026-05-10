@@ -148,7 +148,15 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 WEATHER_CACHE_TTL_SECONDS = int(os.getenv("WEATHER_CACHE_TTL_SECONDS", "3600"))
+WEATHER_RACE_TIMEOUT_SECONDS = float(os.getenv("WEATHER_RACE_TIMEOUT_SECONDS", "15"))
 STATION_API_KEY = os.getenv("STATION_API_KEY", "").strip()
+MQTT_HOST = os.getenv("MQTT_HOST", "127.0.0.1").strip()
+MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "weather/station").strip()
+MQTT_BROKER_NAME = os.getenv("MQTT_BROKER_NAME", "mosquitto").strip()
+IOT_STATION_NAME = os.getenv("IOT_STATION_NAME", "Arduino Uno Weather Station").strip()
+IOT_FIXED_CITY = os.getenv("IOT_FIXED_CITY", "Saransk").strip()
+IOT_OFFLINE_AFTER_SECONDS = int(os.getenv("IOT_OFFLINE_AFTER_SECONDS", "3600"))
 
 if REDIS_URL:
     CACHES = {
@@ -224,6 +232,11 @@ LOGGING = {
             "propagate": False,
         },
         "server.api": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "server.monitoring": {
             "handlers": ["console"],
             "level": "INFO",
             "propagate": False,

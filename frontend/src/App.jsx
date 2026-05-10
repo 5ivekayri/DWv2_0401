@@ -65,10 +65,33 @@ function formatNumber(value, digits = 1) {
 
 function getErrorMessage(error) {
   if (!error) return "";
+  if (error.status === 400) return error.message || "Проверьте поля формы.";
   if (error.status === 401) return "Сессия истекла или нужен вход.";
   if (error.status === 503) return "AI сервис пока не настроен на backend.";
   if (error.status === 502) return "Внешний погодный или AI сервис не ответил.";
   return error.message || "Что-то пошло не так.";
+}
+
+function validateAuthForm(mode, form) {
+  const username = form.username.trim();
+  const email = form.email.trim();
+  const password = form.password;
+
+  if (!username) {
+    throw new Error(mode === "register" ? "Введите username." : "Введите username или email.");
+  }
+
+  if (mode === "register") {
+    if (!email) throw new Error("Введите email.");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Введите корректный email.");
+  }
+
+  if (!password) throw new Error("Введите пароль.");
+  if (mode === "register" && password.length < 8) {
+    throw new Error("Пароль должен быть не короче 8 символов.");
+  }
+
+  return { username, email, password };
 }
 
 function App() {
@@ -134,9 +157,27 @@ function App() {
       { threshold: 0.18, rootMargin: "0px 0px -8% 0px" },
     );
 
-    revealItems.forEach((item) => observer.observe(item));
+    revealItems.forEach((item) => {
+      const rect = item.getBoundingClientRect();
+      const isInViewport = rect.top < window.innerHeight && rect.bottom > 0;
+
+      if (isInViewport) {
+        item.classList.add("is-visible");
+      } else {
+        observer.observe(item);
+      }
+    });
     return () => observer.disconnect();
-  }, []);
+  }, [
+    pathname,
+    isAuthenticated,
+    weather,
+    outfit,
+    notice,
+    weatherHistory.length,
+    stationHistory.length,
+    stationLatest,
+  ]);
 
   async function runTask(key, task) {
     setLoading((current) => ({ ...current, [key]: true }));
@@ -158,15 +199,17 @@ function App() {
     setAuthStatus("");
 
     await runTask("auth", async () => {
+      const cleanedForm = validateAuthForm(authMode, authForm);
+
       if (authMode === "register") {
-        await signup(authForm.username, authForm.email, authForm.password);
+        await signup(cleanedForm.username, cleanedForm.email, cleanedForm.password);
         setAuthMode("login");
         setAuthStatus("Аккаунт создан. Теперь можно войти.");
         navigate("/login");
         return;
       }
 
-      const nextTokens = await login(authForm.username, authForm.password);
+      const nextTokens = await login(cleanedForm.username, cleanedForm.password);
       saveTokens(nextTokens);
       setTokens(nextTokens);
       setAuthStatus("Вход выполнен.");
@@ -522,11 +565,11 @@ function AuthPanel({ authMode, authForm, authStatus, loading, setAuthForm, setAu
         <h2>{authMode === "login" ? "Вход" : "Регистрация"}</h2>
       </div>
       <form className="auth-form" onSubmit={handleAuth}>
-        <input value={authForm.username} onChange={(event) => setAuthForm({ ...authForm, username: event.target.value })} placeholder="username" autoComplete="username" />
+        <input value={authForm.username} onChange={(event) => setAuthForm({ ...authForm, username: event.target.value })} placeholder={authMode === "login" ? "username or email" : "username"} autoComplete="username" required />
         {authMode === "register" && (
-          <input value={authForm.email} onChange={(event) => setAuthForm({ ...authForm, email: event.target.value })} placeholder="email" type="email" autoComplete="email" />
+          <input value={authForm.email} onChange={(event) => setAuthForm({ ...authForm, email: event.target.value })} placeholder="email" type="email" autoComplete="email" required />
         )}
-        <input value={authForm.password} onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })} placeholder="password" type="password" autoComplete={authMode === "login" ? "current-password" : "new-password"} />
+        <input value={authForm.password} onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })} placeholder="password" type="password" minLength={authMode === "register" ? 8 : undefined} autoComplete={authMode === "login" ? "current-password" : "new-password"} required />
         <button className="primary-button" type="submit" disabled={loading}>
           {loading ? <RefreshCw className="spin" size={18} /> : authMode === "login" ? <LogIn size={18} /> : <UserPlus size={18} />}
           {authMode === "login" ? "Войти" : "Создать"}

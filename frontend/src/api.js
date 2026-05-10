@@ -7,6 +7,21 @@ function logApi(event, details = {}) {
   console.info(`[dwv2:api] ${event}`, details);
 }
 
+function formatApiError(payload, fallback) {
+  if (!payload || typeof payload !== "object") return fallback;
+  if (payload.detail) return String(payload.detail);
+  if (payload.error) return String(payload.error);
+
+  const messages = Object.entries(payload)
+    .flatMap(([field, value]) => {
+      const values = Array.isArray(value) ? value : [value];
+      return values.map((item) => `${field}: ${String(item)}`);
+    })
+    .filter(Boolean);
+
+  return messages.length ? messages.join("; ") : fallback;
+}
+
 export function readTokens() {
   try {
     return JSON.parse(localStorage.getItem(TOKEN_KEY)) || null;
@@ -39,7 +54,7 @@ async function parseResponse(response) {
   }
 
   if (!response.ok) {
-    const message = payload.detail || payload.error || `HTTP ${response.status}`;
+    const message = formatApiError(payload, `HTTP ${response.status}`);
     const error = new Error(message);
     error.status = response.status;
     error.payload = payload;

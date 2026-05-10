@@ -18,7 +18,15 @@ class RegisterView(APIView):
     @extend_schema(request=UserRegisterSerializer, responses={201: UserRegisterSerializer})
     def post(self, request):
         serializer = UserRegisterSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        if not serializer.is_valid():
+            log.warning(
+                "signup_failed username=%s email=%s errors=%s",
+                str(request.data.get("username", "")).strip(),
+                str(request.data.get("email", "")).strip().lower(),
+                serializer.errors,
+            )
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
         user = serializer.save()
         log.info("signup_succeeded user_id=%s username=%s", user.pk, user.username)
         return Response({"id": user.pk, "username": user.username, "email": user.email}, status=status.HTTP_201_CREATED)

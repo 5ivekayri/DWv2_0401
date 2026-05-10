@@ -4,7 +4,7 @@ import logging
 import requests
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from dataclasses import asdict
 from datetime import datetime, timezone
 
@@ -20,6 +20,13 @@ from rest_framework.views import APIView
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, OpenApiTypes, extend_schema, inline_serializer
 
 from server.ai.service import OutfitRecommendationService
+from server.monitoring import (
+    record_provider_failure,
+    record_provider_success,
+    record_provider_win,
+    record_race_run,
+    record_system_event,
+)
 from server.models import WeatherHourlySnapshot, WeatherStationReading
 from .weather.contracts import WeatherPoint
 from .weather.factory import build_weather_service
@@ -163,16 +170,31 @@ class WeatherView(APIView):
             request_id,
             provider_name,
         )
+        record_system_event(
+            event="provider_started",
+            source="weather",
+            request_id=request_id,
+            message=f"Provider {provider_name} started",
+            payload={"provider": provider_name},
+        )
 
         try:
             point = provider.get_weather(lat, lon)
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            record_provider_success(name=provider_name, duration_ms=duration_ms)
 
             log.info(
                 "provider_succeeded request_id=%s provider=%s duration_ms=%s",
                 request_id,
                 provider_name,
                 duration_ms,
+            )
+            record_system_event(
+                event="provider_succeeded",
+                source="weather",
+                request_id=request_id,
+                message=f"Provider {provider_name} succeeded",
+                payload={"provider": provider_name, "duration_ms": duration_ms},
             )
 
             return {
@@ -185,6 +207,7 @@ class WeatherView(APIView):
 
         except Exception as exc:
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            record_provider_failure(name=provider_name, duration_ms=duration_ms, error_message=str(exc))
 
             log.warning(
                 "provider_failed request_id=%s provider=%s duration_ms=%s error_type=%s error=%s",
@@ -193,6 +216,19 @@ class WeatherView(APIView):
                 duration_ms,
                 type(exc).__name__,
                 str(exc),
+            )
+            record_system_event(
+                event="provider_failed",
+                source="weather",
+                level="WARNING",
+                request_id=request_id,
+                message=f"Provider {provider_name} failed",
+                payload={
+                    "provider": provider_name,
+                    "duration_ms": duration_ms,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
             )
 
             return {
@@ -339,48 +375,95 @@ class WeatherView(APIView):
             lat,
             lon,
         )
+        race_started_at = django_timezone.now()
+        record_system_event(
+            event="race_started",
+            source="weather",
+            request_id=request_id,
+            message="Race / First Complete started",
+            payload={
+                "providers": [getattr(p, "name", p.__class__.__name__) for p in enabled],
+                "lat": lat,
+                "lon": lon,
+            },
+        )
 
         race_started = time.perf_counter()
         max_workers = min(len(enabled), 4)
         results = []
         last_exc = None
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(self._run_provider, provider, lat, lon, request_id): provider
-                for provider in enabled
-            }
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        futures = {
+            executor.submit(self._run_provider, provider, lat, lon, request_id): provider
+            for provider in enabled
+        }
 
-            for future in as_completed(futures):
-                result = future.result()
-                results.append(result)
+        try:
+            try:
+                completed = as_completed(
+                    futures,
+                    timeout=getattr(settings, "WEATHER_RACE_TIMEOUT_SECONDS", 15),
+                )
+                for future in completed:
+                    result = future.result()
+                    results.append(result)
 
-                if result["success"]:
-                    total_race_ms = round((time.perf_counter() - race_started) * 1000, 2)
-                    point = result["point"]
+                    if result["success"]:
+                        total_race_ms = round((time.perf_counter() - race_started) * 1000, 2)
+                        point = result["point"]
 
-                    log.info(
-                        "race_winner_selected request_id=%s winner=%s winner_duration_ms=%s total_race_ms=%s",
-                        request_id,
-                        result["provider"],
-                        result["duration_ms"],
-                        total_race_ms,
-                    )
+                        log.info(
+                            "race_winner_selected request_id=%s winner=%s winner_duration_ms=%s total_race_ms=%s",
+                            request_id,
+                            result["provider"],
+                            result["duration_ms"],
+                            total_race_ms,
+                        )
+                        record_provider_win(name=result["provider"])
+                        record_race_run(
+                            request_id=request_id,
+                            started_at=race_started_at,
+                            duration_ms=total_race_ms,
+                            winner=result["provider"],
+                        )
+                        record_system_event(
+                            event="race_winner_selected",
+                            source="weather",
+                            request_id=request_id,
+                            message=f"Provider {result['provider']} selected as winner",
+                            payload={
+                                "winner": result["provider"],
+                                "winner_duration_ms": result["duration_ms"],
+                                "duration_ms": total_race_ms,
+                            },
+                        )
 
-                    payload = store_weather_point(
-                        point=point,
-                        city=city,
-                        hour_bucket=hour_bucket,
-                        latitude=lat,
-                        longitude=lon,
-                    )
-                    payload["request_id"] = request_id
-                    payload["cache_status"] = "miss_stored"
+                        payload = store_weather_point(
+                            point=point,
+                            city=city,
+                            hour_bucket=hour_bucket,
+                            latitude=lat,
+                            longitude=lon,
+                        )
+                        payload["request_id"] = request_id
+                        payload["cache_status"] = "miss_stored"
 
-                    api_log.info("weather_response_ready request_id=%s status=200 cache_status=miss_stored source=%s", request_id, payload.get("source"))
-                    return Response(payload, status=status.HTTP_200_OK)
+                        api_log.info("weather_response_ready request_id=%s status=200 cache_status=miss_stored source=%s", request_id, payload.get("source"))
+                        return Response(payload, status=status.HTTP_200_OK)
 
-                last_exc = result["error"]
+                    last_exc = result["error"]
+            except FuturesTimeoutError as exc:
+                last_exc = exc
+                log.warning(
+                    "race_timeout request_id=%s timeout_seconds=%s completed=%s total=%s",
+                    request_id,
+                    getattr(settings, "WEATHER_RACE_TIMEOUT_SECONDS", 15),
+                    len(results),
+                    len(futures),
+                )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         total_race_ms = round((time.perf_counter() - race_started) * 1000, 2)
 
@@ -390,6 +473,32 @@ class WeatherView(APIView):
             total_race_ms,
             [r["provider"] for r in results],
             str(last_exc),
+        )
+        record_race_run(
+            request_id=request_id,
+            started_at=race_started_at,
+            duration_ms=total_race_ms,
+            winner="",
+            status="failed",
+            errors=[
+                {
+                    "provider": result["provider"],
+                    "error": str(result["error"]),
+                }
+                for result in results
+            ],
+        )
+        record_system_event(
+            event="race_failed",
+            source="weather",
+            level="ERROR",
+            request_id=request_id,
+            message="All weather providers failed",
+            payload={
+                "duration_ms": total_race_ms,
+                "tried": [r["provider"] for r in results],
+                "last_error": str(last_exc),
+            },
         )
 
         return Response(
@@ -596,6 +705,16 @@ class StationReadingIngestView(APIView):
         )
         store_station_reading_snapshot(reading)
 
+        record_system_event(
+            event="iot_reading_received",
+            source="iot",
+            message=f"IoT reading received from {reading.station_id}",
+            payload={
+                "station_id": reading.station_id,
+                "temperature_c": reading.temperature_c,
+                "humidity": reading.humidity,
+            },
+        )
         api_log.info("station_ingest_succeeded station_id=%s reading_id=%s", reading.station_id, reading.pk)
         return Response(station_reading_to_payload(reading), status=status.HTTP_201_CREATED)
 

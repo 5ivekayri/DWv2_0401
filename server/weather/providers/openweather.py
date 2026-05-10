@@ -17,11 +17,8 @@ class OpenWeatherProvider(WeatherProvider):
 
     def is_enabled(self) -> bool:
         api_key = os.getenv("OPENWEATHER_API_KEY", "").strip()
-        log.warning(
-            "OpenWeather is_enabled called key_present=%s key_length=%s",
-            bool(api_key),
-            len(api_key),
-        )
+        if os.getenv("TESTING_MODE", "0") == "1":
+            log.info("OpenWeather is_enabled called key_present=%s", bool(api_key))
         return bool(api_key)
     
     def get_weather(self, latitude: float, longitude: float) -> WeatherPoint:

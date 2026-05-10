@@ -82,6 +82,45 @@ class WeatherApiTests(TestCase):
             ).exists()
         )
 
+    def test_weather_race_updates_race_stats(self):
+        admin = get_user_model().objects.create_user(
+            username="admin",
+            password="password123",
+            is_staff=True,
+        )
+
+        class FakeProvider:
+            name = "openmeteo"
+
+            def is_enabled(self):
+                return True
+
+            def get_weather(self, _lat, _lon):
+                return WeatherPoint(
+                    latitude=10.0,
+                    longitude=20.0,
+                    temperature_c=10.0,
+                    pressure_hpa=1012.0,
+                    wind_speed_ms=3.0,
+                    precipitation_mm=0.0,
+                    observed_at=datetime(2026, 5, 3, 0, 0, tzinfo=timezone.utc),
+                    source="openmeteo",
+                )
+
+        with patch("server.views._service", SimpleNamespace(providers=[FakeProvider()])):
+            weather = self.client.get("/api/weather", {"lat": "10.0001", "lon": "20.0001"})
+
+        self.assertEqual(weather.status_code, 200)
+
+        self.client.force_authenticate(user=admin)
+        stats = self.client.get("/api/admin/race/stats/")
+
+        self.assertEqual(stats.status_code, 200)
+        self.assertEqual(stats.data["last_winner"], "openmeteo")
+        self.assertTrue(stats.data["last_request_id"])
+        openmeteo = next(item for item in stats.data["providers"] if item["name"] == "openmeteo")
+        self.assertGreaterEqual(openmeteo["win_count"], 1)
+
     def test_weather_history_requires_jwt_and_returns_points(self):
         user = get_user_model().objects.create_user(username="tester", password="password123")
         hour_bucket = get_hour_bucket()
@@ -173,3 +212,85 @@ class WeatherApiTests(TestCase):
         self.assertEqual(latest.status_code, 200)
         self.assertEqual(history.status_code, 200)
         self.assertEqual(len(history.data["results"]), 1)
+
+
+@override_settings(CACHES=LOC_MEM_CACHE)
+class AdminMonitoringApiTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user(username="user", password="password123")
+        self.admin = get_user_model().objects.create_user(
+            username="admin",
+            password="password123",
+            is_staff=True,
+        )
+
+    def test_dashboard_requires_admin(self):
+        anonymous = self.client.get("/api/admin/dashboard/")
+        self.assertEqual(anonymous.status_code, 401)
+
+        self.client.force_authenticate(user=self.user)
+        forbidden = self.client.get("/api/admin/dashboard/")
+        self.assertEqual(forbidden.status_code, 403)
+
+        self.client.force_authenticate(user=self.admin)
+        allowed = self.client.get("/api/admin/dashboard/")
+        self.assertEqual(allowed.status_code, 200)
+        self.assertIn("components", allowed.data)
+
+    def test_providers_status_includes_required_providers(self):
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.get("/api/admin/providers/status/")
+
+        self.assertEqual(response.status_code, 200)
+        names = {item["name"] for item in response.data}
+        self.assertTrue({"openmeteo", "openweather", "yandex"}.issubset(names))
+
+    def test_provider_check_returns_json_error_instead_of_500(self):
+        class FailingProvider:
+            name = "openmeteo"
+
+            def is_enabled(self):
+                return True
+
+            def get_weather(self, _lat, _lon):
+                raise RuntimeError("provider exploded")
+
+        self.client.force_authenticate(user=self.admin)
+        with patch(
+            "server.admin_views.get_provider_map",
+            return_value={"yandex": None, "openweather": None, "openmeteo": FailingProvider()},
+        ):
+            response = self.client.post(
+                "/api/admin/providers/check/",
+                {"provider": "openmeteo", "lat": 55.7558, "lon": 37.6173},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "error")
+        self.assertIn("provider exploded", response.data["error"])
+
+    def test_iot_status_uses_latest_station_reading(self):
+        self.client.post(
+            "/api/station/readings",
+            {
+                "station_id": "arduino-test",
+                "temperature_c": 22.0,
+                "humidity": 45.0,
+                "pressure_hpa": 1020,
+                "wind_speed_ms": 1.0,
+                "precipitation_mm": 0.0,
+            },
+            format="json",
+        )
+
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get("/api/admin/iot/status/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "online")
+        self.assertEqual(response.data["last_reading"]["temperature"], 22.0)
+        self.assertEqual(response.data["last_reading"]["humidity"], 45.0)

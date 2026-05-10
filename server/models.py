@@ -100,3 +100,101 @@ class WeatherStationReading(models.Model):
 
     def __str__(self) -> str:
         return f"{self.station_id} @ {self.observed_at.isoformat()}"
+
+
+class ProviderHealth(models.Model):
+    STATUS_OK = "ok"
+    STATUS_ERROR = "error"
+    STATUS_DISABLED = "disabled"
+    STATUS_NOT_CONFIGURED = "not_configured"
+
+    STATUS_CHOICES = [
+        (STATUS_OK, "OK"),
+        (STATUS_ERROR, "Error"),
+        (STATUS_DISABLED, "Disabled"),
+        (STATUS_NOT_CONFIGURED, "Not configured"),
+    ]
+
+    name = models.CharField(max_length=64, unique=True)
+    enabled = models.BooleanField(default=False)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_NOT_CONFIGURED)
+
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    last_error_at = models.DateTimeField(null=True, blank=True)
+    last_error_message = models.TextField(null=True, blank=True)
+    last_response_ms = models.FloatField(null=True, blank=True)
+    response_count = models.PositiveIntegerField(default=0)
+    total_response_ms = models.FloatField(default=0.0)
+
+    success_count = models.PositiveIntegerField(default=0)
+    error_count = models.PositiveIntegerField(default=0)
+    win_count = models.PositiveIntegerField(default=0)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self) -> str:
+        return f"{self.name}: {self.status}"
+
+
+class RaceRun(models.Model):
+    STATUS_SUCCESS = "success"
+    STATUS_FAILED = "failed"
+
+    STATUS_CHOICES = [
+        (STATUS_SUCCESS, "Success"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    request_id = models.CharField(max_length=64, db_index=True)
+    started_at = models.DateTimeField(db_index=True)
+    duration_ms = models.FloatField(null=True, blank=True)
+    winner = models.CharField(max_length=64, blank=True, default="")
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES)
+    errors = models.JSONField(default=list, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-started_at", "-created_at"]
+        indexes = [
+            models.Index(fields=["winner", "started_at"]),
+            models.Index(fields=["status", "started_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.request_id}: {self.winner or self.status}"
+
+
+class SystemEvent(models.Model):
+    LEVEL_DEBUG = "DEBUG"
+    LEVEL_INFO = "INFO"
+    LEVEL_WARNING = "WARNING"
+    LEVEL_ERROR = "ERROR"
+
+    LEVEL_CHOICES = [
+        (LEVEL_DEBUG, "Debug"),
+        (LEVEL_INFO, "Info"),
+        (LEVEL_WARNING, "Warning"),
+        (LEVEL_ERROR, "Error"),
+    ]
+
+    timestamp = models.DateTimeField(db_index=True)
+    level = models.CharField(max_length=16, choices=LEVEL_CHOICES, default=LEVEL_INFO, db_index=True)
+    event = models.CharField(max_length=128, db_index=True)
+    message = models.TextField(blank=True, default="")
+    request_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    source = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    payload = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-timestamp", "-id"]
+        indexes = [
+            models.Index(fields=["source", "timestamp"]),
+            models.Index(fields=["event", "timestamp"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.timestamp.isoformat()} {self.level} {self.event}"
