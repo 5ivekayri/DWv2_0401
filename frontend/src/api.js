@@ -99,6 +99,13 @@ export async function login(username, password) {
   });
 }
 
+export async function verifyTelegramLogin(challengeId, code) {
+  return apiRequest("/auth/telegram/2fa/login/verify/", {
+    method: "POST",
+    body: JSON.stringify({ challenge_id: challengeId, code }),
+  });
+}
+
 export async function signup(username, email, password) {
   return apiRequest("/auth/signup/", {
     method: "POST",
@@ -111,6 +118,53 @@ export async function refreshAccess(refresh) {
     method: "POST",
     body: JSON.stringify({ refresh }),
   });
+}
+
+export function getProfile(tokens) {
+  return apiRequest("/auth/profile/", {}, tokens);
+}
+
+export function updateProfile(payload, tokens) {
+  return apiRequest("/auth/profile/", {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  }, tokens);
+}
+
+export function deleteProfile(tokens) {
+  return apiRequest("/auth/profile/", { method: "DELETE" }, tokens);
+}
+
+export function changePassword(payload, tokens) {
+  return apiRequest("/auth/password/change/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }, tokens);
+}
+
+export function getTelegram2FA(tokens) {
+  return apiRequest("/auth/telegram/2fa/", {}, tokens);
+}
+
+export function updateTelegram2FASettings(payload, tokens) {
+  return apiRequest("/auth/telegram/2fa/", {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  }, tokens);
+}
+
+export function startTelegram2FASetup(telegramUsername, tokens) {
+  return apiRequest("/auth/telegram/2fa/setup/start/", {
+    method: "POST",
+    body: JSON.stringify({ telegram_username: telegramUsername }),
+  }, tokens);
+}
+
+export function verifyTelegram2FASetup(code, tokens) {
+  return apiRequest("/auth/telegram/2fa/setup/verify/", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  }, tokens);
 }
 
 export async function geocodeCity(city) {
@@ -126,4 +180,99 @@ export async function geocodeCity(city) {
     latitude: place.latitude,
     longitude: place.longitude,
   };
+}
+
+export function listProviderApplications(tokens) {
+  return apiRequest("/provider-applications/", {}, tokens);
+}
+
+export function createProviderApplication(payload, tokens) {
+  return apiRequest("/provider-applications/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }, tokens);
+}
+
+export function listAdminDwdApplications(tokens) {
+  return apiRequest("/admin/dwd/applications/", {}, tokens);
+}
+
+export function getAdminDwdApplication(id, tokens) {
+  return apiRequest(`/admin/dwd/applications/${id}/`, {}, tokens);
+}
+
+export function updateAdminDwdApplication(id, payload, tokens) {
+  return apiRequest(`/admin/dwd/applications/${id}/`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  }, tokens);
+}
+
+export function approveDwdApplication(id, tokens) {
+  return apiRequest(`/admin/dwd/applications/${id}/approve/`, { method: "POST" }, tokens);
+}
+
+export function rejectDwdApplication(id, tokens) {
+  return apiRequest(`/admin/dwd/applications/${id}/reject/`, { method: "POST" }, tokens);
+}
+
+export function listAdminDwdDevices(tokens) {
+  return apiRequest("/admin/dwd/devices/", {}, tokens);
+}
+
+export function getAdminDwdDevice(id, tokens) {
+  return apiRequest(`/admin/dwd/devices/${id}/`, {}, tokens);
+}
+
+export function updateAdminDwdDevice(id, payload, tokens) {
+  return apiRequest(`/admin/dwd/devices/${id}/`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  }, tokens);
+}
+
+export function runAdminDwdDeviceAction(id, action, tokens) {
+  return apiRequest(`/admin/dwd/devices/${id}/action/`, {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  }, tokens);
+}
+
+export function listAdminDwdDeviceEvents(tokens, params = {}) {
+  const query = new URLSearchParams(params).toString();
+  return apiRequest(`/admin/dwd/device-events/${query ? `?${query}` : ""}`, {}, tokens);
+}
+
+export function listAdminDwdUsers(tokens) {
+  return apiRequest("/admin/dwd/users/", {}, tokens);
+}
+
+export function updateAdminDwdUserRole(id, role, tokens) {
+  return apiRequest(`/admin/dwd/users/${id}/role/`, {
+    method: "PATCH",
+    body: JSON.stringify({ role }),
+  }, tokens);
+}
+
+export function deleteAdminDwdUser(id, tokens) {
+  return apiRequest(`/admin/dwd/users/${id}/`, { method: "DELETE" }, tokens);
+}
+
+export function getProviderDashboard(tokens) {
+  return apiRequest("/provider-dashboard/", {}, tokens);
+}
+
+export function listAdminDwdProvisioning(tokens) {
+  return apiRequest("/admin/dwd/provisioning/", {}, tokens);
+}
+
+export function createDwdProvisioning(payload, tokens) {
+  return apiRequest("/admin/dwd/provisioning/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }, tokens);
+}
+
+export function markDwdProvisioningSent(id, tokens) {
+  return apiRequest(`/admin/dwd/provisioning/${id}/mark-sent/`, { method: "POST" }, tokens);
 }

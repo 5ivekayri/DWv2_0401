@@ -157,6 +157,8 @@ MQTT_BROKER_NAME = os.getenv("MQTT_BROKER_NAME", "mosquitto").strip()
 IOT_STATION_NAME = os.getenv("IOT_STATION_NAME", "Arduino Uno Weather Station").strip()
 IOT_FIXED_CITY = os.getenv("IOT_FIXED_CITY", "Saransk").strip()
 IOT_OFFLINE_AFTER_SECONDS = int(os.getenv("IOT_OFFLINE_AFTER_SECONDS", "3600"))
+TELEGRAM_2FA_BOT_USERNAME = os.getenv("TELEGRAM_2FA_BOT_USERNAME", "darkweather_2fa_bot").strip().lstrip("@")
+TELEGRAM_2FA_BOT_TOKEN = os.getenv("TELEGRAM_2FA_BOT_TOKEN", "").strip()
 
 if REDIS_URL:
     CACHES = {
@@ -242,6 +244,16 @@ LOGGING = {
             "propagate": False,
         },
         "access.api": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "access.telegram_2fa": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "access.telegram_2fa.bot": {
             "handlers": ["console"],
             "level": "INFO",
             "propagate": False,

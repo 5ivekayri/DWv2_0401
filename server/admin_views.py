@@ -15,7 +15,7 @@ from rest_framework.views import APIView
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, OpenApiTypes, extend_schema, inline_serializer
 
 from server.ai.service import OutfitRecommendationService
-from server.models import ProviderHealth, RaceRun, SystemEvent
+from server.models import DWDDevice, ProviderHealth, RaceRun, SystemEvent
 from server.monitoring import (
     KNOWN_PROVIDERS,
     ensure_provider_health,
@@ -362,6 +362,16 @@ class AdminIotStatusView(APIView):
         station = get_latest_station_status(
             offline_after_seconds=getattr(settings, "IOT_OFFLINE_AFTER_SECONDS", 3600)
         )
+        dwd_devices = [
+            {
+                "id": device.id,
+                "station_id": device.station_id,
+                "owner": device.owner.get_username(),
+                "city": device.city,
+                "status": device.status,
+            }
+            for device in DWDDevice.objects.select_related("owner").order_by("-created_at", "-id")[:20]
+        ]
         return Response(
             {
                 "station_name": getattr(settings, "IOT_STATION_NAME", "Arduino Uno Weather Station"),
@@ -374,6 +384,7 @@ class AdminIotStatusView(APIView):
                     "status": check_mqtt(),
                     "topic": getattr(settings, "MQTT_TOPIC", "weather/station"),
                 },
+                "dwd_devices": dwd_devices,
             },
             status=status.HTTP_200_OK,
         )

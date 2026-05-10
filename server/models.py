@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from django.conf import settings
 from django.db import models
 
 
@@ -198,3 +199,245 @@ class SystemEvent(models.Model):
 
     def __str__(self) -> str:
         return f"{self.timestamp.isoformat()} {self.level} {self.event}"
+
+
+class DWDProviderApplication(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_APPROVED = "approved"
+    STATUS_REJECTED = "rejected"
+    STATUS_CANCELLED = "cancelled"
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+        (STATUS_CANCELLED, "Cancelled"),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="dwd_provider_applications",
+    )
+    city = models.CharField(max_length=128)
+    email = models.EmailField(default="")
+    country = models.CharField(max_length=128, blank=True, default="")
+    region = models.CharField(max_length=128, blank=True, default="")
+    address_comment = models.TextField(blank=True, default="")
+    comment = models.TextField()
+    admin_note = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_dwd_provider_applications",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["city", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user_id} {self.city} {self.status}"
+
+
+class DWDDevice(models.Model):
+    STATUS_INACTIVE = "inactive"
+    STATUS_ACTIVE = "active"
+    STATUS_BLOCKED = "blocked"
+
+    STATUS_CHOICES = [
+        (STATUS_INACTIVE, "Inactive"),
+        (STATUS_ACTIVE, "Active"),
+        (STATUS_BLOCKED, "Blocked"),
+    ]
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="dwd_devices",
+    )
+    application = models.OneToOneField(
+        DWDProviderApplication,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="device",
+    )
+    device_code = models.CharField(max_length=64, unique=True, null=True, blank=True)
+    station_id = models.CharField(max_length=64, unique=True)
+    city = models.CharField(max_length=128)
+    country = models.CharField(max_length=128, blank=True, default="")
+    region = models.CharField(max_length=128, blank=True, default="")
+    address_comment = models.TextField(blank=True, default="")
+    firmware_type = models.CharField(max_length=32, blank=True, default="")
+    firmware_version = models.CharField(max_length=64, blank=True, default="")
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    last_request_at = models.DateTimeField(null=True, blank=True)
+    last_data_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_INACTIVE, db_index=True)
+    is_enabled = models.BooleanField(default=True)
+    token = models.CharField(max_length=128, blank=True, default="")
+    notes = models.TextField(blank=True, default="")
+    last_error = models.TextField(blank=True, default="")
+    last_error_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["owner", "status"]),
+            models.Index(fields=["city", "status"]),
+            models.Index(fields=["firmware_type", "status"]),
+            models.Index(fields=["last_seen_at", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.station_id} {self.city} {self.status}"
+
+
+class DWDProvisioning(models.Model):
+    FIRMWARE_SERIAL_BRIDGE = "serial_bridge"
+    FIRMWARE_ESP01_WIFI = "esp01_wifi"
+    FIRMWARE_ETHERNET_SHIELD = "ethernet_shield"
+
+    FIRMWARE_CHOICES = [
+        (FIRMWARE_SERIAL_BRIDGE, "Serial bridge"),
+        (FIRMWARE_ESP01_WIFI, "ESP-01 Wi-Fi"),
+        (FIRMWARE_ETHERNET_SHIELD, "Ethernet shield"),
+    ]
+
+    DELIVERY_NOT_STARTED = "not_started"
+    DELIVERY_FIRMWARE_ASSIGNED = "firmware_assigned"
+    DELIVERY_INSTRUCTION_READY = "instruction_ready"
+    DELIVERY_SENT = "sent"
+    DELIVERY_ACKNOWLEDGED = "acknowledged"
+    DELIVERY_PENDING = DELIVERY_NOT_STARTED
+
+    DELIVERY_STATUS_CHOICES = [
+        (DELIVERY_NOT_STARTED, "Not started"),
+        (DELIVERY_FIRMWARE_ASSIGNED, "Firmware assigned"),
+        (DELIVERY_INSTRUCTION_READY, "Instruction ready"),
+        (DELIVERY_SENT, "Sent"),
+        (DELIVERY_ACKNOWLEDGED, "Acknowledged"),
+    ]
+
+    CHANNEL_EMAIL = "email"
+    CHANNEL_MANUAL = "manual"
+
+    DELIVERY_CHANNEL_CHOICES = [
+        (CHANNEL_EMAIL, "Email"),
+        (CHANNEL_MANUAL, "Manual"),
+    ]
+
+    application = models.ForeignKey(
+        DWDProviderApplication,
+        on_delete=models.CASCADE,
+        related_name="provisioning_records",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="dwd_provisioning_records",
+    )
+    device = models.ForeignKey(
+        DWDDevice,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="provisioning_records",
+    )
+    firmware_type = models.CharField(max_length=32, choices=FIRMWARE_CHOICES)
+    firmware_version = models.CharField(max_length=64, blank=True, default="")
+    instruction_text = models.TextField()
+    delivery_status = models.CharField(
+        max_length=32,
+        choices=DELIVERY_STATUS_CHOICES,
+        default=DELIVERY_NOT_STARTED,
+        db_index=True,
+    )
+    sent_at = models.DateTimeField(null=True, blank=True)
+    sent_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="sent_dwd_provisioning_records",
+    )
+    delivery_channel = models.CharField(max_length=32, choices=DELIVERY_CHANNEL_CHOICES, default=CHANNEL_MANUAL)
+    notes = models.TextField(blank=True, default="")
+    internal_note = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["firmware_type", "delivery_status"]),
+            models.Index(fields=["user", "delivery_status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user_id} {self.firmware_type} {self.delivery_status}"
+
+
+class DWDDeviceEvent(models.Model):
+    EVENT_REGISTERED = "registered"
+    EVENT_ACTIVATED = "activated"
+    EVENT_HEARTBEAT = "heartbeat"
+    EVENT_DATA_INGEST = "data_ingest"
+    EVENT_AUTH_FAILED = "auth_failed"
+    EVENT_OFFLINE_DETECTED = "offline_detected"
+    EVENT_BLOCKED = "blocked"
+    EVENT_SETTINGS_CHANGED = "settings_changed"
+    EVENT_ERROR = "error"
+
+    EVENT_TYPE_CHOICES = [
+        (EVENT_REGISTERED, "Registered"),
+        (EVENT_ACTIVATED, "Activated"),
+        (EVENT_HEARTBEAT, "Heartbeat"),
+        (EVENT_DATA_INGEST, "Data ingest"),
+        (EVENT_AUTH_FAILED, "Auth failed"),
+        (EVENT_OFFLINE_DETECTED, "Offline detected"),
+        (EVENT_BLOCKED, "Blocked"),
+        (EVENT_SETTINGS_CHANGED, "Settings changed"),
+        (EVENT_ERROR, "Error"),
+    ]
+
+    SEVERITY_INFO = "info"
+    SEVERITY_WARNING = "warning"
+    SEVERITY_ERROR = "error"
+
+    SEVERITY_CHOICES = [
+        (SEVERITY_INFO, "Info"),
+        (SEVERITY_WARNING, "Warning"),
+        (SEVERITY_ERROR, "Error"),
+    ]
+
+    device = models.ForeignKey(DWDDevice, on_delete=models.CASCADE, related_name="events")
+    event_type = models.CharField(max_length=32, choices=EVENT_TYPE_CHOICES, db_index=True)
+    severity = models.CharField(max_length=16, choices=SEVERITY_CHOICES, default=SEVERITY_INFO, db_index=True)
+    message = models.TextField(blank=True, default="")
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["device", "created_at"]),
+            models.Index(fields=["event_type", "created_at"]),
+            models.Index(fields=["severity", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.device_id} {self.event_type} {self.severity}"

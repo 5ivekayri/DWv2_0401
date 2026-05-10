@@ -5,11 +5,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from server.models import WeatherHourlySnapshot
+from server.models import DWDDevice, DWDDeviceEvent, DWDProviderApplication, DWDProvisioning, WeatherHourlySnapshot
 from server.weather.contracts import WeatherPoint
 from server.weather.storage import get_hour_bucket, normalize_coordinate
 
@@ -294,3 +295,182 @@ class AdminMonitoringApiTests(TestCase):
         self.assertEqual(response.data["status"], "online")
         self.assertEqual(response.data["last_reading"]["temperature"], 22.0)
         self.assertEqual(response.data["last_reading"]["humidity"], 45.0)
+
+
+@override_settings(CACHES=LOC_MEM_CACHE)
+class DWDProviderApplicationApiTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        User = get_user_model()
+        self.user = User.objects.create_user(username="provider-user", password="password123")
+        self.admin = User.objects.create_user(username="admin-user", password="password123", is_staff=True)
+
+    def create_application(self, *, city="Berlin"):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            "/api/provider-applications/",
+            {"city": city, "email": "device-contact@example.com", "comment": "I want to connect my DWD device."},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        return DWDProviderApplication.objects.get(pk=response.data["id"])
+
+    def approve_application(self, application):
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.post(f"/api/admin/dwd/applications/{application.pk}/approve/")
+        self.assertEqual(response.status_code, 200)
+        application.refresh_from_db()
+        return response
+
+    def test_application_requires_city_and_email(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            "/api/provider-applications/",
+            {"comment": "I want to connect my DWD device."},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("city", response.data)
+        self.assertIn("email", response.data)
+
+    def test_application_with_city_is_created(self):
+        application = self.create_application(city="Berlin")
+
+        self.assertEqual(application.city, "Berlin")
+        self.assertEqual(application.email, "device-contact@example.com")
+        self.assertEqual(application.user, self.user)
+        self.assertEqual(application.status, DWDProviderApplication.STATUS_PENDING)
+
+    def test_user_cannot_create_second_pending_application(self):
+        self.create_application(city="Berlin")
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            "/api/provider-applications/",
+            {"city": "Paris", "email": "other@example.com", "comment": "Second device."},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_approve_grants_provider_group_and_creates_device_with_city(self):
+        application = self.create_application(city="Saransk")
+
+        response = self.approve_application(application)
+
+        self.assertEqual(response.data["status"], DWDProviderApplication.STATUS_APPROVED)
+        self.assertTrue(Group.objects.get(name="provider").user_set.filter(pk=self.user.pk).exists())
+        self.assertEqual(application.device.city, "Saransk")
+        self.assertEqual(application.device.owner, self.user)
+        self.assertEqual(application.device.status, DWDDevice.STATUS_INACTIVE)
+        self.assertTrue(application.device.device_code)
+        self.assertTrue(application.device.token)
+        self.assertTrue(application.device.events.filter(event_type=DWDDeviceEvent.EVENT_REGISTERED).exists())
+
+    def test_admin_can_create_and_mark_provisioning_sent(self):
+        application = self.create_application(city="Berlin")
+        self.approve_application(application)
+
+        response = self.client.post(
+            "/api/admin/dwd/provisioning/",
+            {
+                "application_id": application.pk,
+                "user_id": self.user.pk,
+                "device_id": application.device.pk,
+                "firmware_type": "esp01_wifi",
+                "firmware_version": "1.0.0",
+                "instruction_text": "Open Arduino IDE, configure Wi-Fi and upload ESP-01 firmware.",
+                "delivery_channel": "email",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        provisioning = DWDProvisioning.objects.get(pk=response.data["id"])
+        self.assertEqual(provisioning.firmware_type, DWDProvisioning.FIRMWARE_ESP01_WIFI)
+        self.assertIn("ESP-01", provisioning.instruction_text)
+        self.assertEqual(provisioning.delivery_status, DWDProvisioning.DELIVERY_INSTRUCTION_READY)
+        application.device.refresh_from_db()
+        self.assertEqual(application.device.firmware_type, DWDProvisioning.FIRMWARE_ESP01_WIFI)
+
+        sent = self.client.post(f"/api/admin/dwd/provisioning/{provisioning.pk}/mark-sent/")
+
+        self.assertEqual(sent.status_code, 200)
+        provisioning.refresh_from_db()
+        self.assertEqual(provisioning.delivery_status, DWDProvisioning.DELIVERY_SENT)
+        self.assertEqual(provisioning.sent_by, self.admin)
+        self.assertIsNotNone(provisioning.sent_at)
+
+    def test_admin_users_roles_and_device_events_endpoints(self):
+        application = self.create_application(city="Berlin")
+        self.approve_application(application)
+        self.client.force_authenticate(user=self.admin)
+
+        users = self.client.get("/api/admin/dwd/users/")
+        self.assertEqual(users.status_code, 200)
+        provider_user = next(item for item in users.data if item["id"] == self.user.pk)
+        self.assertEqual(provider_user["role"], "provider")
+        self.assertEqual(provider_user["active_application"]["city"], "Berlin")
+
+        role = self.client.patch(
+            f"/api/admin/dwd/users/{self.user.pk}/role/",
+            {"role": "user"},
+            format="json",
+        )
+        self.assertEqual(role.status_code, 200)
+        self.assertEqual(role.data["role"], "user")
+
+        note = self.client.patch(
+            f"/api/admin/dwd/applications/{application.pk}/",
+            {"admin_note": "Call user before provisioning."},
+            format="json",
+        )
+        self.assertEqual(note.status_code, 200)
+        self.assertEqual(note.data["admin_note"], "Call user before provisioning.")
+
+        action = self.client.post(
+            f"/api/admin/dwd/devices/{application.device.pk}/action/",
+            {"action": "block"},
+            format="json",
+        )
+        self.assertEqual(action.status_code, 200)
+        self.assertEqual(action.data["status"], DWDDevice.STATUS_BLOCKED)
+
+        events = self.client.get("/api/admin/dwd/device-events/", {"device_id": application.device.pk})
+        self.assertEqual(events.status_code, 200)
+        self.assertTrue(any(item["event_type"] == DWDDeviceEvent.EVENT_BLOCKED for item in events.data))
+
+    def test_admin_can_delete_user_but_not_self(self):
+        target = get_user_model().objects.create_user(
+            username="delete-target",
+            email="delete-target@example.com",
+            password="password123",
+        )
+        self.client.force_authenticate(user=self.admin)
+
+        self_delete = self.client.delete(f"/api/admin/dwd/users/{self.admin.pk}/")
+        deleted = self.client.delete(f"/api/admin/dwd/users/{target.pk}/")
+
+        self.assertEqual(self_delete.status_code, 400)
+        self.assertEqual(deleted.status_code, 204)
+        self.assertFalse(get_user_model().objects.filter(pk=target.pk).exists())
+
+    def test_regular_user_cannot_manage_provisioning(self):
+        application = self.create_application(city="Berlin")
+        self.approve_application(application)
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            "/api/admin/dwd/provisioning/",
+            {
+                "application_id": application.pk,
+                "firmware_type": "serial_bridge",
+                "instruction_text": "Upload serial bridge firmware.",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 403)
