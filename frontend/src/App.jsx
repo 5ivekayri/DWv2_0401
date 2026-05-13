@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  ChevronLeft,
+  ChevronRight,
   CheckCircle2,
   CloudSun,
   Cpu,
@@ -20,6 +22,7 @@ import {
   ShieldCheck,
   Sparkles,
   Sun,
+  Terminal,
   Thermometer,
   UserCircle,
   UserPlus,
@@ -36,6 +39,9 @@ import {
   deleteAdminDwdUser,
   deleteProfile,
   geocodeCity,
+  getExtendedWeather,
+  getAdminIotConfig,
+  getAdminIotStatus,
   getProviderDashboard,
   getProfile,
   listAdminDwdDeviceEvents,
@@ -43,6 +49,7 @@ import {
   listAdminDwdDevices,
   listAdminDwdProvisioning,
   listAdminDwdUsers,
+  listAdminLogs,
   listProviderApplications,
   login,
   markDwdProvisioningSent,
@@ -55,6 +62,7 @@ import {
   updateTelegram2FASettings,
   updateAdminDwdApplication,
   updateAdminDwdDevice,
+  updateAdminIotConfig,
   updateAdminDwdUserRole,
   updateProfile,
   verifyTelegram2FASetup,
@@ -84,11 +92,11 @@ const DEFAULT_TELEGRAM_2FA_FORM = {
 const DEFAULT_LOGIN_2FA_FORM = { code: "" };
 const FIRMWARE_TEMPLATES = {
   serial_bridge:
-    "1. Откройте Arduino IDE.\n2. Вставьте код прошивки serial_bridge.\n3. Выберите плату и serial-порт.\n4. Нажмите Upload.\n5. Подключите плату к bridge-хосту и проверьте телеметрию в DWv2.",
+    "1. Откройте Arduino IDE.\n2. Вставьте код прошивки serial_bridge.\n3. Выберите плату и serial-порт.\n4. Нажмите Upload.\n5. Подключите плату к bridge-хосту и проверьте телеметрию в Dark Weather.",
   esp01_wifi:
-    "1. Откройте Arduino IDE.\n2. Вставьте код прошивки ESP-01 Wi-Fi.\n3. Укажите Wi-Fi credentials и настройки устройства DWv2.\n4. Выберите плату ESP-01 и режим загрузки.\n5. Загрузите прошивку и проверьте телеметрию в DWv2.",
+    "1. Откройте Arduino IDE.\n2. Вставьте код прошивки ESP-01 Wi-Fi.\n3. Укажите Wi-Fi credentials и настройки устройства Dark Weather.\n4. Выберите плату ESP-01 и режим загрузки.\n5. Загрузите прошивку и проверьте телеметрию в Dark Weather.",
   ethernet_shield:
-    "1. Откройте Arduino IDE и вставьте код прошивки Ethernet Shield.\n2. Проверьте сетевые настройки.\n3. Выберите плату Arduino.\n4. Загрузите прошивку.\n5. Подключите Ethernet и проверьте телеметрию в DWv2.",
+    "1. Откройте Arduino IDE и вставьте код прошивки Ethernet Shield.\n2. Проверьте сетевые настройки.\n3. Выберите плату Arduino.\n4. Загрузите прошивку.\n5. Подключите Ethernet и проверьте телеметрию в Dark Weather.",
 };
 const DEFAULT_PROVISIONING_FORM = {
   application_id: "",
@@ -99,6 +107,13 @@ const DEFAULT_PROVISIONING_FORM = {
   instruction_text: FIRMWARE_TEMPLATES.serial_bridge,
   delivery_channel: "email",
   notes: "",
+};
+const DEFAULT_IOT_CONFIG_FORM = {
+  connection_mode: "wifi_esp01",
+  serial_port: "COM3",
+  baud_rate: 9600,
+  linked_device_id: "",
+  enabled: false,
 };
 
 function logUi(event, details = {}) {
@@ -149,6 +164,16 @@ function toTelegram2FAForm(settings = {}) {
   };
 }
 
+function toIotConfigForm(config = {}) {
+  return {
+    connection_mode: config.connection_mode || DEFAULT_IOT_CONFIG_FORM.connection_mode,
+    serial_port: config.serial_port || config.serial?.port || DEFAULT_IOT_CONFIG_FORM.serial_port,
+    baud_rate: Number(config.baud_rate || config.serial?.baud_rate || DEFAULT_IOT_CONFIG_FORM.baud_rate),
+    linked_device_id: config.linked_device?.id ? String(config.linked_device.id) : "",
+    enabled: Boolean(config.enabled ?? config.serial?.enabled),
+  };
+}
+
 function validateAuthForm(mode, form) {
   const username = form.username.trim();
   const email = form.email.trim();
@@ -183,6 +208,9 @@ function App() {
   const [sectionPulse, setSectionPulse] = useState("");
   const [coords, setCoords] = useState(DEFAULT_COORDS);
   const [weather, setWeather] = useState(null);
+  const [extendedOpen, setExtendedOpen] = useState(false);
+  const [extendedWeather, setExtendedWeather] = useState(null);
+  const [extendedLoadedKey, setExtendedLoadedKey] = useState("");
   const [weatherHistory, setWeatherHistory] = useState([]);
   const [outfit, setOutfit] = useState(null);
   const [stationId, setStationId] = useState("arduino-1");
@@ -196,6 +224,10 @@ function App() {
   const [adminDwdDevices, setAdminDwdDevices] = useState([]);
   const [adminDwdProvisioning, setAdminDwdProvisioning] = useState([]);
   const [adminDwdEvents, setAdminDwdEvents] = useState([]);
+  const [adminSerialLogs, setAdminSerialLogs] = useState([]);
+  const [adminIotConfig, setAdminIotConfig] = useState(null);
+  const [adminIotStatus, setAdminIotStatus] = useState(null);
+  const [iotConfigForm, setIotConfigForm] = useState(DEFAULT_IOT_CONFIG_FORM);
   const [provisioningForm, setProvisioningForm] = useState(DEFAULT_PROVISIONING_FORM);
   const [profile, setProfile] = useState(null);
   const [profileForm, setProfileForm] = useState(DEFAULT_PROFILE_FORM);
@@ -204,7 +236,7 @@ function App() {
   const [login2FAChallenge, setLogin2FAChallenge] = useState(null);
   const [login2FAForm, setLogin2FAForm] = useState(DEFAULT_LOGIN_2FA_FORM);
   const [isDwdAdmin, setIsDwdAdmin] = useState(false);
-  const [loading, setLoading] = useState({ weather: false, station: false, auth: false, dwd: false, profile: false });
+  const [loading, setLoading] = useState({ weather: false, extended: false, station: false, auth: false, dwd: false, profile: false });
   const [notice, setNotice] = useState("");
 
   const isAuthenticated = Boolean(tokens?.access);
@@ -221,6 +253,9 @@ function App() {
     } else {
       setStationLatest(null);
       setStationHistory([]);
+      setExtendedOpen(false);
+      setExtendedWeather(null);
+      setExtendedLoadedKey("");
       setDwdApplications([]);
       setProviderDashboard(null);
       setAdminDwdUsers([]);
@@ -228,6 +263,10 @@ function App() {
       setAdminDwdDevices([]);
       setAdminDwdProvisioning([]);
       setAdminDwdEvents([]);
+      setAdminSerialLogs([]);
+      setAdminIotConfig(null);
+      setAdminIotStatus(null);
+      setIotConfigForm(DEFAULT_IOT_CONFIG_FORM);
       setProfile(null);
       setProfileForm(DEFAULT_PROFILE_FORM);
       setPasswordForm(DEFAULT_PASSWORD_FORM);
@@ -278,6 +317,8 @@ function App() {
     pathname,
     isAuthenticated,
     weather,
+    extendedOpen,
+    extendedWeather,
     outfit,
     notice,
     weatherHistory.length,
@@ -472,6 +513,9 @@ function App() {
     clearTokens();
     setTokens(null);
     setWeatherHistory([]);
+    setExtendedOpen(false);
+    setExtendedWeather(null);
+    setExtendedLoadedKey("");
     setStationLatest(null);
     setStationHistory([]);
     setDwdApplications([]);
@@ -539,6 +583,9 @@ function App() {
     await runTask("weather", async () => {
       const target = searchMode === "city" ? await resolveCity() : nextCoords;
       const params = new URLSearchParams({ lat: target.lat, lon: target.lon });
+      setExtendedOpen(false);
+      setExtendedWeather(null);
+      setExtendedLoadedKey("");
       logUi("weather_load_started", { target, authenticated: Boolean(nextTokens?.access) });
       const current = await apiRequest(`/weather?${params}`);
       setWeather(current);
@@ -555,7 +602,7 @@ function App() {
         body: JSON.stringify({
           city: target.city || "Выбранная локация",
           temperature_c: current.temperature_c,
-          humidity: stationLatest?.humidity ?? 70,
+          humidity: stationLatest?.reading?.humidity ?? stationLatest?.humidity ?? 70,
           wind_speed_ms: current.wind_speed_ms,
           precipitation_mm: current.precipitation_mm,
           condition,
@@ -568,7 +615,41 @@ function App() {
         });
 
       await loadWeatherHistory(params, nextTokens);
+      await loadStation(nextTokens, target);
     });
+  }
+
+  function getExtendedKey(target = coords) {
+    return `${target.city || ""}:${target.lat}:${target.lon}:7`;
+  }
+
+  async function loadExtendedWeather(nextTokens = tokens, target = coords) {
+    if (!nextTokens?.access) return;
+
+    const key = getExtendedKey(target);
+    if (extendedWeather && extendedLoadedKey === key) return;
+
+    await runTask("extended", async () => {
+      const payload = await getExtendedWeather(
+        {
+          city: target.city || "",
+          lat: target.lat,
+          lon: target.lon,
+          days: 7,
+        },
+        nextTokens,
+      );
+      setExtendedWeather(payload);
+      setExtendedLoadedKey(key);
+    });
+  }
+
+  async function handleExtendedToggle() {
+    const nextOpen = !extendedOpen;
+    setExtendedOpen(nextOpen);
+    if (nextOpen && isAuthenticated) {
+      await loadExtendedWeather(tokens, coords);
+    }
   }
 
   async function loadWeatherHistory(params, nextTokens = tokens) {
@@ -592,18 +673,19 @@ function App() {
     }
   }
 
-  async function loadStation(nextTokens = tokens) {
+  async function loadStation(nextTokens = tokens, target = coords) {
     if (!nextTokens?.access) return;
     await runTask("station", async () => {
-      const params = new URLSearchParams({ station_id: stationId });
+      const city = target.city || coords.city;
+      const params = city ? new URLSearchParams({ city }) : new URLSearchParams({ station_id: stationId });
       const history = await apiRequest(`/station/history?${params}&limit=100`);
       setStationHistory(history.results || []);
-      logUi("station_history_loaded", { stationId, results: history.results?.length || 0 });
+      logUi("station_history_loaded", { city, stationId, results: history.results?.length || 0 });
 
       try {
         const latest = await apiRequest(`/station/latest?${params}`);
         setStationLatest(latest);
-        logUi("station_latest_loaded", { stationId, readingId: latest.id });
+        logUi("station_latest_loaded", { city, stationId, available: latest.available, readingId: latest.reading?.id || latest.id });
       } catch (error) {
         if (error.status === 404) {
           setStationLatest(null);
@@ -628,18 +710,25 @@ function App() {
     }
 
     try {
-      const [users, applications, devices, provisioning, events] = await Promise.all([
+      const [users, applications, devices, provisioning, events, serialLogs, iotConfig, iotStatus] = await Promise.all([
         listAdminDwdUsers(nextTokens),
         listAdminDwdApplications(nextTokens),
         listAdminDwdDevices(nextTokens),
         listAdminDwdProvisioning(nextTokens),
         listAdminDwdDeviceEvents(nextTokens, { limit: 200 }),
+        listAdminLogs(nextTokens, { source: "serial_bridge", limit: 100 }),
+        getAdminIotConfig(nextTokens),
+        getAdminIotStatus(nextTokens),
       ]);
       setAdminDwdUsers(Array.isArray(users) ? users : []);
       setAdminDwdApplications(Array.isArray(applications) ? applications : []);
       setAdminDwdDevices(Array.isArray(devices) ? devices : []);
       setAdminDwdProvisioning(Array.isArray(provisioning) ? provisioning : []);
       setAdminDwdEvents(Array.isArray(events) ? events : []);
+      setAdminSerialLogs(Array.isArray(serialLogs) ? serialLogs : []);
+      setAdminIotConfig(iotConfig || null);
+      setAdminIotStatus(iotStatus || null);
+      setIotConfigForm(toIotConfigForm(iotConfig));
       setIsDwdAdmin(true);
     } catch (error) {
       if (error.status === 403) {
@@ -648,6 +737,10 @@ function App() {
         setAdminDwdDevices([]);
         setAdminDwdProvisioning([]);
         setAdminDwdEvents([]);
+        setAdminSerialLogs([]);
+        setAdminIotConfig(null);
+        setAdminIotStatus(null);
+        setIotConfigForm(DEFAULT_IOT_CONFIG_FORM);
         setIsDwdAdmin(false);
         return;
       }
@@ -808,6 +901,30 @@ function App() {
     });
   }
 
+  function handleIotConfigField(field, value) {
+    setIotConfigForm((current) => ({ ...current, [field]: value }));
+  }
+
+  async function handleIotConfigSubmit(event) {
+    event.preventDefault();
+    const payload = {
+      connection_mode: iotConfigForm.connection_mode,
+      serial_port: iotConfigForm.serial_port.trim(),
+      baud_rate: Number(iotConfigForm.baud_rate) || 9600,
+      linked_device_id: iotConfigForm.linked_device_id ? Number(iotConfigForm.linked_device_id) : null,
+      enabled: Boolean(iotConfigForm.enabled),
+    };
+
+    await runTask("dwd", async () => {
+      const updated = await updateAdminIotConfig(payload, tokens);
+      const status = await getAdminIotStatus(tokens);
+      setAdminIotConfig(updated);
+      setAdminIotStatus(status);
+      setIotConfigForm(toIotConfigForm(updated));
+      setNotice("Настройки Serial Bridge сохранены.");
+    });
+  }
+
   const heroStyle = useMemo(() => {
     const temp = weather?.temperature_c ?? 12;
     const hue = temp < 0 ? 205 : temp > 25 ? 35 : 175;
@@ -823,9 +940,9 @@ function App() {
       <div className="sky-orbit orbit-b" />
 
       <header className="topbar glass-panel">
-        <a className="brand" href="/weather" aria-label="DW Погода" onClick={(event) => { event.preventDefault(); navigate("/weather"); }}>
+        <a className="brand" href="/weather" aria-label="Dark Weather" onClick={(event) => { event.preventDefault(); navigate("/weather"); }}>
           <span className="brand-mark"><CloudSun size={24} /></span>
-          <span>DW Погода</span>
+          <span>Dark Weather</span>
         </a>
         <nav className="nav-links" aria-label="Навигация">
           <a href="/weather" onClick={(event) => { event.preventDefault(); navigate("/weather"); }}>Погода</a>
@@ -928,6 +1045,10 @@ function App() {
           devices={adminDwdDevices}
           provisioningRecords={adminDwdProvisioning}
           events={adminDwdEvents}
+          serialLogs={adminSerialLogs}
+          iotConfig={adminIotConfig}
+          iotStatus={adminIotStatus}
+          iotConfigForm={iotConfigForm}
           provisioningForm={provisioningForm}
           loading={loading.dwd}
           loadDwd={loadDwd}
@@ -942,6 +1063,8 @@ function App() {
           onProvisioningFieldChange={handleProvisioningField}
           onProvisioningSubmit={handleProvisioningSubmit}
           onProvisioningSent={handleProvisioningSent}
+          onIotConfigFieldChange={handleIotConfigField}
+          onIotConfigSubmit={handleIotConfigSubmit}
           navigate={navigate}
         />
       ) : (
@@ -1029,6 +1152,15 @@ function App() {
           <OutfitCard outfit={outfit} />
         </section>
 
+        <ExtendedForecastSection
+          isAuthenticated={isAuthenticated}
+          open={extendedOpen}
+          data={extendedWeather}
+          loading={loading.extended}
+          onToggle={handleExtendedToggle}
+          navigate={navigate}
+        />
+
         <section className={`charts-section glass-panel reveal ${sectionPulse === "charts" ? "section-pulse" : ""}`} id="charts">
           <div className="section-heading">
             <div>
@@ -1056,8 +1188,8 @@ function App() {
             </div>
             {isAuthenticated && (
               <div className="station-controls">
-                <input value={stationId} onChange={(event) => setStationId(event.target.value)} aria-label="ID станции" />
-                <button className="icon-button" onClick={() => loadStation()} title="Обновить станцию">
+                <span className="city-chip">{coords.city || "выбранный город"}</span>
+                <button className="icon-button" onClick={() => loadStation(tokens, coords)} title="Обновить локальную телеметрию">
                   {loading.station ? <RefreshCw className="spin" size={18} /> : <RefreshCw size={18} />}
                 </button>
               </div>
@@ -1086,10 +1218,10 @@ function AboutPage() {
   return (
     <main className="page-shell">
       <section className="info-page glass-panel reveal is-visible">
-        <span className="eyebrow">О проекте DW Погода</span>
+        <span className="eyebrow">О проекте Dark Weather</span>
         <h1>Погода, AI и локальные станции в одной системе</h1>
         <p>
-          DW Погода объединяет внешние погодные API, почасовое кеширование, AI-рекомендации по одежде
+          Dark Weather объединяет внешние погодные API, почасовое кеширование, AI-рекомендации по одежде
           и телеметрию Arduino. DWD-провайдеры подключают свои устройства вручную через заявку и прошивку.
         </p>
         <div className="info-grid">
@@ -1106,7 +1238,7 @@ function AboutPage() {
           <article>
             <Cpu size={22} />
             <strong>Готово к IoT</strong>
-            <span>Arduino-данные сейчас принимаются через API, позже через MQTT.</span>
+            <span>Arduino-данные принимаются через API, MQTT и Serial Bridge.</span>
           </article>
         </div>
       </section>
@@ -1349,6 +1481,10 @@ function AdminPanelPage({
   devices,
   provisioningRecords,
   events,
+  serialLogs,
+  iotConfig,
+  iotStatus,
+  iotConfigForm,
   provisioningForm,
   loading,
   loadDwd,
@@ -1363,6 +1499,8 @@ function AdminPanelPage({
   onProvisioningFieldChange,
   onProvisioningSubmit,
   onProvisioningSent,
+  onIotConfigFieldChange,
+  onIotConfigSubmit,
   navigate,
 }) {
   const adminSections = [
@@ -1371,6 +1509,7 @@ function AdminPanelPage({
     ["provisioning", "Выдача прошивки"],
     ["devices", "Устройства"],
     ["events", "События устройств"],
+    ["serial", "Serial Bridge"],
     ["instructions", "Инструкции"],
   ];
   const currentSection = adminSections.find(([key]) => pathname.includes(`/admin-panel/${key}`))?.[0] || "users";
@@ -1421,6 +1560,20 @@ function AdminPanelPage({
     }
     if (currentSection === "events") {
       return <AdminDeviceEventsPage events={events} devices={devices} />;
+    }
+    if (currentSection === "serial") {
+      return (
+        <AdminSerialBridgePage
+          iotConfig={iotConfig}
+          iotStatus={iotStatus}
+          form={iotConfigForm}
+          devices={devices}
+          serialLogs={serialLogs}
+          loading={loading}
+          onFieldChange={onIotConfigFieldChange}
+          onSubmit={onIotConfigSubmit}
+        />
+      );
     }
       return (
         <AdminInstructionsPage
@@ -1628,8 +1781,49 @@ function AdminDevicesPage({ devices, selectedDeviceId, events, loading, onDevice
 }
 
 function DeviceDetailCard({ device, events, loading, onDevicePatch, onDeviceAction }) {
-  const [notes, setNotes] = useState(device.notes || "");
-  useEffect(() => setNotes(device.notes || ""), [device.id, device.notes]);
+  const [metadata, setMetadata] = useState({
+    device_code: device.device_code || "",
+    station_id: device.station_id || "",
+    city: device.city || "",
+    firmware_type: device.firmware_type || "",
+    firmware_version: device.firmware_version || "",
+    ip_address: device.ip_address || "",
+    status: device.status || "inactive",
+    is_enabled: Boolean(device.is_enabled),
+    notes: device.notes || "",
+  });
+  useEffect(() => {
+    setMetadata({
+      device_code: device.device_code || "",
+      station_id: device.station_id || "",
+      city: device.city || "",
+      firmware_type: device.firmware_type || "",
+      firmware_version: device.firmware_version || "",
+      ip_address: device.ip_address || "",
+      status: device.status || "inactive",
+      is_enabled: Boolean(device.is_enabled),
+      notes: device.notes || "",
+    });
+  }, [device.id, device.device_code, device.station_id, device.city, device.firmware_type, device.firmware_version, device.ip_address, device.status, device.is_enabled, device.notes]);
+
+  function updateMetadata(field, value) {
+    setMetadata((current) => ({ ...current, [field]: value }));
+  }
+
+  function saveMetadata() {
+    onDevicePatch(device.id, {
+      device_code: metadata.device_code.trim() || null,
+      station_id: metadata.station_id.trim(),
+      city: metadata.city.trim(),
+      firmware_type: metadata.firmware_type.trim(),
+      firmware_version: metadata.firmware_version.trim(),
+      ip_address: metadata.ip_address.trim() || null,
+      status: metadata.status,
+      is_enabled: Boolean(metadata.is_enabled),
+      notes: metadata.notes,
+    });
+  }
+
   return (
     <article className="dwd-card detail-card">
       <div className="panel-title"><Cpu size={20} /><h3>{device.device_code || device.station_id}</h3></div>
@@ -1647,9 +1841,55 @@ function DeviceDetailCard({ device, events, loading, onDevicePatch, onDeviceActi
         <Metric icon={<Send size={18} />} label="Инструкция" value={device.instruction_sent ? `отправлена ${formatDate(device.instruction_sent_at)}` : statusLabel(device.provisioning_status || "not_started")} />
         <Metric icon={<FileText size={18} />} label="Последняя ошибка" value={device.last_error || "нет"} />
       </div>
-      <label><span>Заметки по устройству</span><textarea value={notes} onChange={(event) => setNotes(event.target.value)} /></label>
+      <form className="dwd-form compact-form device-edit-form" onSubmit={(event) => { event.preventDefault(); saveMetadata(); }}>
+        <label>
+          <span>Название / device code</span>
+          <input value={metadata.device_code} onChange={(event) => updateMetadata("device_code", event.target.value)} placeholder="DWD Saransk Station" />
+        </label>
+        <label>
+          <span>Station ID</span>
+          <input value={metadata.station_id} onChange={(event) => updateMetadata("station_id", event.target.value)} placeholder="DWD-SARANSK-001" required />
+        </label>
+        <label>
+          <span>Город</span>
+          <input value={metadata.city} onChange={(event) => updateMetadata("city", event.target.value)} placeholder="Saransk" required />
+        </label>
+        <label>
+          <span>IP address</span>
+          <input value={metadata.ip_address} onChange={(event) => updateMetadata("ip_address", event.target.value)} placeholder="опционально" />
+        </label>
+        <label>
+          <span>Firmware type</span>
+          <select value={metadata.firmware_type} onChange={(event) => updateMetadata("firmware_type", event.target.value)}>
+            <option value="">не выбрано</option>
+            <option value="serial_bridge">serial_bridge</option>
+            <option value="esp01_wifi">esp01_wifi</option>
+            <option value="ethernet_shield">ethernet_shield</option>
+          </select>
+        </label>
+        <label>
+          <span>Firmware version</span>
+          <input value={metadata.firmware_version} onChange={(event) => updateMetadata("firmware_version", event.target.value)} placeholder="1.0.0" />
+        </label>
+        <label>
+          <span>Статус</span>
+          <select value={metadata.status} onChange={(event) => updateMetadata("status", event.target.value)}>
+            <option value="inactive">inactive</option>
+            <option value="active">active</option>
+            <option value="blocked">blocked</option>
+          </select>
+        </label>
+        <label className="checkbox-row serial-enabled-row">
+          <input type="checkbox" checked={metadata.is_enabled} onChange={(event) => updateMetadata("is_enabled", event.target.checked)} />
+          <span>Устройство включено</span>
+        </label>
+        <label className="wide-field">
+          <span>Заметки по устройству</span>
+          <textarea value={metadata.notes} onChange={(event) => updateMetadata("notes", event.target.value)} />
+        </label>
+        <button className="primary-button" type="submit" disabled={loading}>Сохранить станцию</button>
+      </form>
       <div className="row-actions">
-        <button className="primary-button" type="button" disabled={loading} onClick={() => onDevicePatch(device.id, { notes })}>Сохранить заметки</button>
         <button className="icon-text-button" type="button" disabled={loading} onClick={() => onDeviceAction(device.id, "enable")}>Включить</button>
         <button className="icon-text-button" type="button" disabled={loading} onClick={() => onDeviceAction(device.id, "disable")}>Выключить</button>
         <button className="danger-button compact-danger" type="button" disabled={loading} onClick={() => onDeviceAction(device.id, "block")}>Заблокировать</button>
@@ -1664,6 +1904,139 @@ function AdminDeviceEventsPage({ events, devices }) {
     <AdminTableCard title="События устройств / мониторинг" icon={<Activity size={20} />}>
       <DeviceEventsList events={events} devices={devices} />
     </AdminTableCard>
+  );
+}
+
+function AdminSerialBridgePage({ iotConfig, iotStatus, form, devices = [], serialLogs = [], loading, onFieldChange, onSubmit }) {
+  const serial = iotStatus?.serial || iotConfig?.serial || {};
+  const lastReading = iotStatus?.last_reading || null;
+  const lastTemperature = lastReading?.temperature_c ?? lastReading?.temperature;
+  const linkedDevice = devices.find((device) => String(device.id) === String(form.linked_device_id)) || iotConfig?.linked_device || null;
+  const selectableDevices = devices.filter((device) => device.status !== "blocked");
+
+  return (
+    <div className="admin-page-grid">
+      <AdminTableCard title="Serial Bridge" icon={<Radio size={20} />}>
+        <div className="detail-grid serial-status-grid">
+          <Metric icon={<Settings size={18} />} label="Режим подключения" value={statusLabel(iotStatus?.connection_mode || iotConfig?.connection_mode || form.connection_mode)} />
+          <Metric icon={<Cpu size={18} />} label="Устройство" value={linkedDevice ? `${linkedDevice.device_code || linkedDevice.name || linkedDevice.station_id} (${linkedDevice.city})` : "не выбрано"} />
+          <Metric icon={<MapPin size={18} />} label="Город станции" value={linkedDevice?.city || "не выбран"} />
+          <Metric icon={<Radio size={18} />} label="Station ID" value={linkedDevice?.station_id || "не выбран"} />
+          <Metric icon={<Activity size={18} />} label="Статус станции" value={statusLabel(iotStatus?.status || "unknown")} />
+          <Metric icon={<Radio size={18} />} label="Статус serial" value={statusLabel(serial.status || "unknown")} />
+          <Metric icon={<Cpu size={18} />} label="Порт" value={serial.port || form.serial_port || "не выбран"} />
+          <Metric icon={<Activity size={18} />} label="Baud rate" value={serial.baud_rate || form.baud_rate || 9600} />
+          <Metric icon={<RefreshCw size={18} />} label="Последний сигнал" value={formatDate(serial.last_seen || iotStatus?.last_seen)} />
+          <Metric icon={<Thermometer size={18} />} label="Температура" value={lastTemperature !== null && lastTemperature !== undefined ? `${formatNumber(lastTemperature)} °C` : "нет данных"} />
+          <Metric icon={<Droplets size={18} />} label="Влажность" value={lastReading?.humidity !== null && lastReading?.humidity !== undefined ? `${formatNumber(lastReading.humidity, 0)}%` : "нет данных"} />
+          <Metric icon={<FileText size={18} />} label="Последняя ошибка" value={serial.last_error || "нет"} />
+        </div>
+      </AdminTableCard>
+
+      <AdminTableCard title="Настройки подключения" icon={<Settings size={20} />}>
+        <form className="dwd-form compact-form serial-config-form" onSubmit={onSubmit}>
+          <label>
+            <span>Connection mode</span>
+            <select value={form.connection_mode} onChange={(event) => onFieldChange("connection_mode", event.target.value)}>
+              <option value="wifi_esp01">ESP-01 Wi-Fi</option>
+              <option value="serial_bridge">Serial Bridge</option>
+              <option value="ethernet_shield">Ethernet Shield</option>
+            </select>
+          </label>
+          <label>
+            <span>DWD device</span>
+            <select value={form.linked_device_id} onChange={(event) => onFieldChange("linked_device_id", event.target.value)}>
+              <option value="">Не привязывать</option>
+              {selectableDevices.map((device) => (
+                <option key={device.id} value={device.id}>
+                  {device.device_code || device.station_id} — {device.city} — {device.station_id}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Serial port</span>
+            <input
+              value={form.serial_port}
+              onChange={(event) => onFieldChange("serial_port", event.target.value)}
+              placeholder="COM3 или /dev/ttyUSB0"
+            />
+          </label>
+          <label>
+            <span>Baud rate</span>
+            <select value={form.baud_rate} onChange={(event) => onFieldChange("baud_rate", Number(event.target.value))}>
+              <option value={9600}>9600</option>
+              <option value={19200}>19200</option>
+              <option value={38400}>38400</option>
+              <option value={57600}>57600</option>
+              <option value={115200}>115200</option>
+            </select>
+          </label>
+          <label className="checkbox-row serial-enabled-row">
+            <input
+              type="checkbox"
+              checked={form.enabled}
+              onChange={(event) => onFieldChange("enabled", event.target.checked)}
+            />
+            <span>Включить Serial Bridge reader</span>
+          </label>
+          <div className="wide-field serial-help">
+            Arduino должен отправлять JSON-строки вида <code>{'{"temperature":23.5,"humidity":48,"source":"serial_bridge"}'}</code>. Ошибки DHT11 вида <code>{'{"error":"dht_read_failed"}'}</code> будут залогированы и пропущены.
+          </div>
+          <div className="wide-field serial-help">
+            После сохранения настроек запустите на машине с Arduino: <code>python manage.py run_serial_bridge</code>
+          </div>
+          {linkedDevice && (
+            <div className="wide-field serial-help">
+              Serial Bridge привязан к устройству <strong>{linkedDevice.device_code || linkedDevice.name || linkedDevice.station_id}</strong> ({linkedDevice.city}). Если Arduino передаёт <code>station_id</code>, он должен совпадать с <code>{linkedDevice.station_id}</code>.
+            </div>
+          )}
+          <button className="primary-button" type="submit" disabled={loading}>
+            Сохранить настройки
+          </button>
+        </form>
+      </AdminTableCard>
+
+      <AdminTableCard title="Serial terminal" icon={<Terminal size={20} />}>
+        <SerialTerminal events={serialLogs} />
+      </AdminTableCard>
+    </div>
+  );
+}
+
+function SerialTerminal({ events }) {
+  if (!events.length) {
+    return (
+      <div className="serial-terminal-empty">
+        <Terminal size={20} />
+        <span>Пока нет serial-событий. Запустите reader и отправьте строку из Arduino.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="serial-terminal" role="log" aria-label="Serial Bridge events">
+      {events.map((event, index) => {
+        const payload = event.payload || {};
+        const raw = payload.raw_line || "";
+        const normalized = payload.normalized_temperature ?? payload.temperature ?? "";
+        const humidity = payload.raw_humidity ?? payload.humidity ?? "";
+        return (
+          <div className={`terminal-line terminal-${String(event.level || "INFO").toLowerCase()}`} key={`${event.timestamp}-${event.event}-${index}`}>
+            <span className="terminal-time">{formatDate(event.timestamp)}</span>
+            <span className="terminal-level">{event.level}</span>
+            <span className="terminal-event">{event.event}</span>
+            <span className="terminal-message">{event.message}</span>
+            {raw && <code>{raw}</code>}
+            {(normalized !== "" || humidity !== "") && (
+              <span className="terminal-values">
+                temp={normalized || "—"} humidity={humidity || "—"} station={payload.station_id || "—"}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1840,6 +2213,12 @@ function statusLabel(value) {
     blocked: "заблокировано",
     online: "online",
     offline: "offline",
+    connected: "подключено",
+    disconnected: "нет подключения",
+    serial_bridge: "Serial Bridge",
+    wifi_esp01: "ESP-01 Wi-Fi",
+    ethernet_shield: "Ethernet Shield",
+    unknown: "неизвестно",
     not_started: "не начато",
     firmware_assigned: "прошивка выбрана",
     instruction_ready: "инструкция готова",
@@ -2284,6 +2663,207 @@ function AccessGate({ text, navigate }) {
   );
 }
 
+function ExtendedForecastSection({ isAuthenticated, open, data, loading, onToggle, navigate }) {
+  const [selectedDate, setSelectedDate] = useState("");
+  const [hourIndex, setHourIndex] = useState(0);
+  const [hourTransition, setHourTransition] = useState("next");
+  const activeHourRef = useRef(null);
+  const daily = data?.daily || [];
+  const hourly = data?.hourly || [];
+  const activeDate = selectedDate || daily[0]?.date || "";
+  const selectedDay = daily.find((day) => day.date === activeDate) || daily[0];
+  const selectedHours = hourly.filter((hour) => getHourlyDate(hour) === activeDate);
+  const activeHour = selectedHours[Math.min(hourIndex, Math.max(selectedHours.length - 1, 0))];
+
+  useEffect(() => {
+    if (!daily.length) {
+      setSelectedDate("");
+      setHourIndex(0);
+      return;
+    }
+    if (!daily.some((day) => day.date === selectedDate)) {
+      setSelectedDate(daily[0].date);
+      setHourIndex(0);
+    }
+  }, [daily, selectedDate]);
+
+  useEffect(() => {
+    setHourIndex(0);
+  }, [selectedDate]);
+
+  useEffect(() => {
+    if (selectedHours.length && hourIndex > selectedHours.length - 1) {
+      setHourIndex(selectedHours.length - 1);
+    }
+  }, [hourIndex, selectedHours.length]);
+
+  useEffect(() => {
+    activeHourRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+      inline: "center",
+    });
+  }, [hourIndex, selectedDate]);
+
+  function selectHour(nextIndex) {
+    if (nextIndex === hourIndex) return;
+    setHourTransition(nextIndex > hourIndex ? "next" : "prev");
+    setHourIndex(nextIndex);
+  }
+
+  function moveHour(delta) {
+    const nextIndex = Math.min(Math.max(hourIndex + delta, 0), Math.max(selectedHours.length - 1, 0));
+    selectHour(nextIndex);
+  }
+
+  return (
+    <section className="extended-section glass-panel reveal is-visible">
+      <div className="section-heading">
+        <div>
+          <span className="eyebrow">Visual Crossing</span>
+          <h2>Подробный прогноз</h2>
+        </div>
+        {isAuthenticated && data?.cached && <span className="cache-pill">Данные загружены из кэша</span>}
+      </div>
+
+      {!isAuthenticated ? (
+        <AccessGate navigate={navigate} text="Подробный прогноз доступен после входа в аккаунт." />
+      ) : (
+        <>
+          <button className="icon-text-button extended-toggle" type="button" onClick={onToggle} disabled={loading}>
+            {loading ? <RefreshCw className="spin" size={18} /> : <CloudSun size={18} />}
+            {open ? "Скрыть подробный прогноз" : "Показать больше"}
+          </button>
+
+          {open && (
+            <div className="extended-content">
+              {loading && !data ? (
+                <p className="empty-state">Загружаем расширенный прогноз...</p>
+              ) : daily.length ? (
+                <>
+                  <div className="forecast-days" role="tablist" aria-label="Дни прогноза">
+                    {daily.map((day) => (
+                      <button
+                        className={day.date === activeDate ? "active" : ""}
+                        key={day.date}
+                        type="button"
+                        role="tab"
+                        aria-selected={day.date === activeDate}
+                        onClick={() => setSelectedDate(day.date)}
+                      >
+                        <strong>{formatForecastDate(day.date)}</strong>
+                        <span>{formatNumber(day.temp_min)}...{formatNumber(day.temp_max)} C</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  <article className="forecast-detail">
+                    <div className="forecast-summary">
+                      <div>
+                        <span className="eyebrow">{formatForecastDate(selectedDay?.date)}</span>
+                        <h3>{selectedDay?.conditions || "Подробный прогноз"}</h3>
+                      </div>
+                      <span className="cache-pill">{selectedHours.length ? `${selectedHours.length} часов` : "Нет почасовых данных"}</span>
+                    </div>
+
+                    <div className="forecast-values forecast-values-grid">
+                      <Metric icon={<Thermometer size={18} />} label="Температура за день" value={`${formatNumber(selectedDay?.temp_min)}...${formatNumber(selectedDay?.temp_max)} C`} />
+                      <Metric icon={<Droplets size={18} />} label="Влажность" value={`${formatNumber(selectedDay?.humidity, 0)}%`} />
+                      <Metric icon={<Wind size={18} />} label="Ветер" value={`${formatNumber(selectedDay?.wind_speed)} m/s`} />
+                      <Metric icon={<Waves size={18} />} label="Вероятность осадков" value={`${formatNumber(selectedDay?.precip_probability, 0)}%`} />
+                    </div>
+
+                    {selectedHours.length ? (
+                      <div className="hourly-panel">
+                        <div className={`hourly-current hourly-current-${hourTransition}`} key={`${activeDate}-${hourIndex}-${hourTransition}-summary`}>
+                          <strong>{activeHour?.time || formatHourLabel(activeHour)}</strong>
+                          <span>{activeHour?.conditions || "Без описания"}</span>
+                        </div>
+
+                        <div className="hourly-carousel" aria-label="Почасовой прогноз">
+                          <button
+                            aria-label="Предыдущий час"
+                            className="icon-button hourly-arrow"
+                            disabled={hourIndex <= 0}
+                            type="button"
+                            onClick={() => moveHour(-1)}
+                          >
+                            <ChevronLeft size={20} />
+                          </button>
+
+                          <div className="hourly-track" role="listbox" aria-label="Часы выбранного дня">
+                            {selectedHours.map((hour, index) => (
+                              <button
+                                aria-selected={index === hourIndex}
+                                className={`hour-chip ${index === hourIndex ? "active" : ""}`}
+                                key={`${hour.datetime}-${index}`}
+                                ref={index === hourIndex ? activeHourRef : null}
+                                role="option"
+                                type="button"
+                                onClick={() => selectHour(index)}
+                              >
+                                <strong>{hour.time || formatHourLabel(hour)}</strong>
+                                <span>{formatNumber(hour.temp)} C</span>
+                              </button>
+                            ))}
+                          </div>
+
+                          <button
+                            aria-label="Следующий час"
+                            className="icon-button hourly-arrow"
+                            disabled={hourIndex >= selectedHours.length - 1}
+                            type="button"
+                            onClick={() => moveHour(1)}
+                          >
+                            <ChevronRight size={20} />
+                          </button>
+                        </div>
+
+                        <div className={`hourly-metrics hourly-metrics-${hourTransition}`} key={`${activeDate}-${hourIndex}-${hourTransition}-metrics`}>
+                          <Metric icon={<Thermometer size={18} />} label="Температура" value={`${formatNumber(activeHour?.temp)} C`} />
+                          <Metric icon={<Droplets size={18} />} label="Влажность" value={`${formatNumber(activeHour?.humidity, 0)}%`} />
+                          <Metric icon={<Wind size={18} />} label="Ветер" value={`${formatNumber(activeHour?.wind_speed)} m/s`} />
+                          <Metric icon={<Waves size={18} />} label="Осадки" value={`${formatNumber(activeHour?.precip_probability, 0)}%`} />
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="empty-state">Для выбранного дня почасовых данных нет.</p>
+                    )}
+                  </article>
+                </>
+              ) : (
+                <p className="empty-state">Подробный прогноз пока пуст.</p>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function getHourlyDate(hour) {
+  if (hour?.date) return hour.date;
+  if (hour?.datetime) return String(hour.datetime).slice(0, 10);
+  return "";
+}
+
+function formatHourLabel(hour) {
+  const value = hour?.time || hour?.datetime;
+  if (!value) return "—";
+  const parts = String(value).split("T");
+  return (parts[1] || parts[0]).slice(0, 5);
+}
+
+function formatForecastDate(value) {
+  if (!value) return "Дата не указана";
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "2-digit",
+    month: "short",
+    weekday: "short",
+  }).format(new Date(`${value}T12:00:00`));
+}
+
 function WeatherCard({ weather }) {
   return (
     <article className="weather-card glass-panel reveal">
@@ -2323,23 +2903,30 @@ function OutfitCard({ outfit }) {
 }
 
 function StationLatest({ reading }) {
-  if (!reading) {
+  if (!reading || reading.available === false) {
+    const city = reading?.city ? ` ${reading.city}` : "";
+    const message = reading?.status === "stale"
+      ? "Данные станции устарели. Дождитесь нового измерения от Dark Weather Device."
+      : `В данном городе${city} нет ни одного Dark Weather Device.`;
     return (
       <div className="station-empty">
         <Cpu size={22} />
         <div>
           <strong>Нет последних данных</strong>
-          <p>В данном городе нет ни одного Dark Weather Device.</p>
+          <p>{message}</p>
         </div>
       </div>
     );
   }
 
+  const station = reading.station || null;
+  const payload = reading.reading || reading;
+  const temperature = payload.temperature_c ?? payload.temperature;
   const items = [
-    ["Температура", `${formatNumber(reading?.temperature_c)} C`, <Thermometer size={18} />],
-    ["Влажность", `${formatNumber(reading?.humidity, 0)}%`, <Droplets size={18} />],
-    ["Давление", `${formatNumber(reading?.pressure_hpa, 0)} hPa`, <Waves size={18} />],
-    ["Ветер", `${formatNumber(reading?.wind_speed_ms)} m/s`, <Wind size={18} />],
+    ["Температура", `${formatNumber(temperature)} C`, <Thermometer size={18} />],
+    ["Влажность", `${formatNumber(payload?.humidity, 0)}%`, <Droplets size={18} />],
+    ["Давление", `${formatNumber(payload?.pressure_hpa, 0)} hPa`, <Waves size={18} />],
+    ["Ветер", `${formatNumber(payload?.wind_speed_ms)} m/s`, <Wind size={18} />],
   ];
 
   return (
@@ -2347,8 +2934,9 @@ function StationLatest({ reading }) {
       {items.map(([label, value, icon]) => (
         <Metric key={label} icon={icon} label={label} value={value} />
       ))}
-      <Metric icon={<Cpu size={18} />} label="Замер" value={formatDate(reading?.observed_at)} />
-      <Metric icon={<Activity size={18} />} label="Источник" value={reading?.data_source || "—"} />
+      <Metric icon={<Cpu size={18} />} label="Станция" value={station ? `${station.name} / ${station.city}` : payload?.station_id || "—"} />
+      <Metric icon={<RefreshCw size={18} />} label="Замер" value={formatDate(payload?.created_at || payload?.observed_at)} />
+      <Metric icon={<Activity size={18} />} label="Источник" value={payload?.source || payload?.data_source || "—"} />
     </div>
   );
 }

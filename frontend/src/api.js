@@ -182,6 +182,11 @@ export async function geocodeCity(city) {
   };
 }
 
+export function getExtendedWeather(params, tokens) {
+  const query = new URLSearchParams(params).toString();
+  return apiRequest(`/weather/extended/?${query}`, {}, tokens);
+}
+
 export function listProviderApplications(tokens) {
   return apiRequest("/provider-applications/", {}, tokens);
 }
@@ -243,6 +248,11 @@ export function listAdminDwdDeviceEvents(tokens, params = {}) {
   return apiRequest(`/admin/dwd/device-events/${query ? `?${query}` : ""}`, {}, tokens);
 }
 
+export function listAdminLogs(tokens, params = {}) {
+  const query = new URLSearchParams(params).toString();
+  return apiRequest(`/admin/logs/${query ? `?${query}` : ""}`, {}, tokens);
+}
+
 export function listAdminDwdUsers(tokens) {
   return apiRequest("/admin/dwd/users/", {}, tokens);
 }
@@ -275,4 +285,19 @@ export function createDwdProvisioning(payload, tokens) {
 
 export function markDwdProvisioningSent(id, tokens) {
   return apiRequest(`/admin/dwd/provisioning/${id}/mark-sent/`, { method: "POST" }, tokens);
+}
+
+export function getAdminIotConfig(tokens) {
+  return apiRequest("/admin/iot/config/", {}, tokens);
+}
+
+export function updateAdminIotConfig(payload, tokens) {
+  return apiRequest("/admin/iot/config/", {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  }, tokens);
+}
+
+export function getAdminIotStatus(tokens) {
+  return apiRequest("/admin/iot/status/", {}, tokens);
 }

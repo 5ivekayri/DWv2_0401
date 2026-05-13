@@ -12,7 +12,16 @@ from server.models import ProviderHealth, RaceRun, SystemEvent, WeatherStationRe
 
 log = logging.getLogger("server.monitoring")
 
-KNOWN_PROVIDERS = ("yandex", "openweather", "openmeteo")
+KNOWN_RACE_PROVIDERS = ("yandex", "openweather", "openmeteo")
+KNOWN_RICH_PROVIDERS = ("visual_crossing",)
+KNOWN_PROVIDERS = (*KNOWN_RACE_PROVIDERS, *KNOWN_RICH_PROVIDERS)
+
+
+def provider_traits(name: str) -> dict[str, bool]:
+    return {
+        "race_enabled": name in KNOWN_RACE_PROVIDERS,
+        "rich_provider": name in KNOWN_RICH_PROVIDERS,
+    }
 
 
 def utc_iso(value) -> str | None:
@@ -149,6 +158,7 @@ def provider_health_to_payload(obj: ProviderHealth) -> dict[str, Any]:
     return {
         "name": obj.name,
         "enabled": obj.enabled,
+        **provider_traits(obj.name),
         "status": obj.status,
         "last_success_at": utc_iso(obj.last_success_at),
         "last_error_at": utc_iso(obj.last_error_at),
@@ -177,6 +187,7 @@ def system_event_to_payload(obj: SystemEvent) -> dict[str, Any]:
         "message": obj.message,
         "request_id": obj.request_id or None,
         "source": obj.source,
+        "payload": obj.payload or {},
     }
 
 
@@ -206,5 +217,6 @@ def get_latest_station_status(*, offline_after_seconds: int) -> dict[str, Any]:
         "last_reading": {
             "temperature": latest.temperature_c,
             "humidity": latest.humidity,
+            "source": latest.source,
         },
     }

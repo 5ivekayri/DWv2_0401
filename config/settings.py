@@ -149,6 +149,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 WEATHER_CACHE_TTL_SECONDS = int(os.getenv("WEATHER_CACHE_TTL_SECONDS", "3600"))
 WEATHER_RACE_TIMEOUT_SECONDS = float(os.getenv("WEATHER_RACE_TIMEOUT_SECONDS", "15"))
+VISUAL_CROSSING_API_KEY = os.getenv("VISUAL_CROSSING_API_KEY", "").strip()
+VISUAL_CROSSING_TIMEOUT_SECONDS = float(os.getenv("VISUAL_CROSSING_TIMEOUT_SECONDS", "10"))
+VISUAL_CROSSING_RACE_ENABLED = os.getenv("VISUAL_CROSSING_RACE_ENABLED", "0") == "1"
 STATION_API_KEY = os.getenv("STATION_API_KEY", "").strip()
 MQTT_HOST = os.getenv("MQTT_HOST", "127.0.0.1").strip()
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
@@ -157,6 +160,11 @@ MQTT_BROKER_NAME = os.getenv("MQTT_BROKER_NAME", "mosquitto").strip()
 IOT_STATION_NAME = os.getenv("IOT_STATION_NAME", "Arduino Uno Weather Station").strip()
 IOT_FIXED_CITY = os.getenv("IOT_FIXED_CITY", "Saransk").strip()
 IOT_OFFLINE_AFTER_SECONDS = int(os.getenv("IOT_OFFLINE_AFTER_SECONDS", "3600"))
+IOT_CONNECTION_MODE = os.getenv("IOT_CONNECTION_MODE", "wifi_esp01").strip()
+SERIAL_BRIDGE_ENABLED = os.getenv("SERIAL_BRIDGE_ENABLED", "0") == "1"
+SERIAL_BRIDGE_PORT = os.getenv("SERIAL_BRIDGE_PORT", "COM3").strip()
+SERIAL_BRIDGE_BAUD_RATE = int(os.getenv("SERIAL_BRIDGE_BAUD_RATE", "9600"))
+SERIAL_BRIDGE_TIMEOUT_SECONDS = float(os.getenv("SERIAL_BRIDGE_TIMEOUT_SECONDS", "2"))
 TELEGRAM_2FA_BOT_USERNAME = os.getenv("TELEGRAM_2FA_BOT_USERNAME", "darkweather_2fa_bot").strip().lstrip("@")
 TELEGRAM_2FA_BOT_TOKEN = os.getenv("TELEGRAM_2FA_BOT_TOKEN", "").strip()
 
@@ -187,7 +195,7 @@ REST_FRAMEWORK = {
 }
 
 SPECTACULAR_SETTINGS = {
-    "TITLE": "DWv2 Weather API",
+    "TITLE": "Dark Weather API",
     "DESCRIPTION": "Weather, AI outfit, auth and Arduino station endpoints.",
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,

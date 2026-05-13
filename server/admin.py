@@ -1,6 +1,14 @@
 from django.contrib import admin
 
-from .models import DWDDevice, DWDDeviceEvent, DWDProviderApplication, DWDProvisioning
+from .models import (
+    DWDDevice,
+    DWDDeviceEvent,
+    DWDProviderApplication,
+    DWDProvisioning,
+    ExtendedWeatherSnapshot,
+    IoTConfiguration,
+    WeatherStationReading,
+)
 
 
 @admin.register(DWDProviderApplication)
@@ -42,3 +50,25 @@ class DWDDeviceEventAdmin(admin.ModelAdmin):
     list_filter = ("event_type", "severity", "created_at")
     search_fields = ("device__device_code", "device__station_id", "message", "ip_address")
     readonly_fields = ("created_at",)
+
+
+@admin.register(ExtendedWeatherSnapshot)
+class ExtendedWeatherSnapshotAdmin(admin.ModelAdmin):
+    list_display = ("id", "city", "source", "forecast_days", "latitude", "longitude", "created_at", "expires_at")
+    list_filter = ("source", "forecast_days", "created_at", "expires_at")
+    search_fields = ("city", "location", "source")
+    readonly_fields = ("created_at",)
+
+
+@admin.register(WeatherStationReading)
+class WeatherStationReadingAdmin(admin.ModelAdmin):
+    list_display = ("id", "device", "station_id", "source", "temperature_c", "humidity", "observed_at", "created_at")
+    list_filter = ("source", "device", "station_id", "observed_at")
+    search_fields = ("station_id", "source", "device__device_code", "device__city")
+    readonly_fields = ("created_at",)
+
+
+@admin.register(IoTConfiguration)
+class IoTConfigurationAdmin(admin.ModelAdmin):
+    list_display = ("id", "connection_mode", "linked_device", "serial_enabled", "serial_port", "baud_rate", "serial_status", "updated_at")
+    readonly_fields = ("created_at", "updated_at", "serial_last_seen_at")

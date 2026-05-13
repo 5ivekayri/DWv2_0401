@@ -78,7 +78,51 @@ class WeatherHourlySnapshot(models.Model):
         return f"{self.data_source}:{self.latitude},{self.longitude} @ {self.hour_bucket.isoformat()}"
 
 
+class ExtendedWeatherSnapshot(models.Model):
+    SOURCE_VISUAL_CROSSING = "visual_crossing"
+
+    city = models.CharField(max_length=128, blank=True, default="")
+    location = models.CharField(max_length=256, blank=True, default="")
+    latitude = models.FloatField()
+    longitude = models.FloatField()
+    source = models.CharField(max_length=64, default=SOURCE_VISUAL_CROSSING, db_index=True)
+    forecast_days = models.PositiveSmallIntegerField(default=7)
+    payload_json = models.JSONField(default=dict, blank=True)
+    normalized_daily_json = models.JSONField(default=list, blank=True)
+    normalized_hourly_json = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    expires_at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["source", "latitude", "longitude", "forecast_days", "expires_at"]),
+            models.Index(fields=["city", "source", "forecast_days", "expires_at"]),
+        ]
+
+    def __str__(self) -> str:
+        label = self.city or self.location or f"{self.latitude},{self.longitude}"
+        return f"{self.source}:{label} {self.forecast_days}d"
+
+
 class WeatherStationReading(models.Model):
+    SOURCE_SERIAL_BRIDGE = "serial_bridge"
+    SOURCE_WIFI_ESP01 = "wifi_esp01"
+    SOURCE_ETHERNET_SHIELD = "ethernet_shield"
+
+    SOURCE_CHOICES = [
+        (SOURCE_SERIAL_BRIDGE, "Serial Bridge"),
+        (SOURCE_WIFI_ESP01, "ESP-01 Wi-Fi"),
+        (SOURCE_ETHERNET_SHIELD, "Ethernet Shield"),
+    ]
+
+    device = models.ForeignKey(
+        "DWDDevice",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="readings",
+    )
     station_id = models.CharField(max_length=64, db_index=True, default="arduino-1")
     latitude = models.FloatField(null=True, blank=True)
     longitude = models.FloatField(null=True, blank=True)
@@ -90,17 +134,76 @@ class WeatherStationReading(models.Model):
     precipitation_mm = models.FloatField(default=0.0)
 
     observed_at = models.DateTimeField(db_index=True)
+    source = models.CharField(max_length=32, choices=SOURCE_CHOICES, default=SOURCE_WIFI_ESP01, db_index=True)
     raw_payload = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["-observed_at", "-created_at"]
         indexes = [
+            models.Index(fields=["device", "observed_at"]),
             models.Index(fields=["station_id", "observed_at"]),
+            models.Index(fields=["source", "observed_at"]),
         ]
 
     def __str__(self) -> str:
         return f"{self.station_id} @ {self.observed_at.isoformat()}"
+
+
+class IoTConfiguration(models.Model):
+    CONNECTION_SERIAL_BRIDGE = "serial_bridge"
+    CONNECTION_WIFI_ESP01 = "wifi_esp01"
+    CONNECTION_ETHERNET_SHIELD = "ethernet_shield"
+
+    CONNECTION_MODE_CHOICES = [
+        (CONNECTION_SERIAL_BRIDGE, "Serial Bridge"),
+        (CONNECTION_WIFI_ESP01, "ESP-01 Wi-Fi"),
+        (CONNECTION_ETHERNET_SHIELD, "Ethernet Shield"),
+    ]
+
+    SERIAL_STATUS_DISABLED = "disabled"
+    SERIAL_STATUS_DISCONNECTED = "disconnected"
+    SERIAL_STATUS_CONNECTED = "connected"
+    SERIAL_STATUS_ERROR = "error"
+
+    SERIAL_STATUS_CHOICES = [
+        (SERIAL_STATUS_DISABLED, "Disabled"),
+        (SERIAL_STATUS_DISCONNECTED, "Disconnected"),
+        (SERIAL_STATUS_CONNECTED, "Connected"),
+        (SERIAL_STATUS_ERROR, "Error"),
+    ]
+
+    connection_mode = models.CharField(
+        max_length=32,
+        choices=CONNECTION_MODE_CHOICES,
+        default=CONNECTION_WIFI_ESP01,
+    )
+    linked_device = models.ForeignKey(
+        "DWDDevice",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="iot_configurations",
+    )
+    serial_enabled = models.BooleanField(default=False)
+    serial_port = models.CharField(max_length=128, blank=True, default="COM3")
+    baud_rate = models.PositiveIntegerField(default=9600)
+    serial_status = models.CharField(
+        max_length=32,
+        choices=SERIAL_STATUS_CHOICES,
+        default=SERIAL_STATUS_DISABLED,
+    )
+    serial_last_error = models.TextField(blank=True, default="")
+    serial_last_seen_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "IoT configuration"
+        verbose_name_plural = "IoT configuration"
+
+    def __str__(self) -> str:
+        return f"{self.connection_mode} serial={self.serial_status}"
 
 
 class ProviderHealth(models.Model):

@@ -6,7 +6,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from django.conf import settings
 from django.utils import timezone as django_timezone
@@ -20,6 +20,7 @@ from rest_framework.views import APIView
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, OpenApiTypes, extend_schema, inline_serializer
 
 from server.ai.service import OutfitRecommendationService
+from server.iot.devices import device_station_payload, find_device_by_station_id, record_device_reading
 from server.monitoring import (
     record_provider_failure,
     record_provider_success,
@@ -27,7 +28,7 @@ from server.monitoring import (
     record_race_run,
     record_system_event,
 )
-from server.models import WeatherHourlySnapshot, WeatherStationReading
+from server.models import DWDDevice, WeatherHourlySnapshot, WeatherStationReading
 from .weather.contracts import WeatherPoint
 from .weather.factory import build_weather_service
 from .weather.geocoding import geocode_city
@@ -41,6 +42,7 @@ from .weather.storage import (
     store_station_reading_snapshot,
     store_weather_point,
 )
+from .weather.visual_crossing import ExtendedWeatherService, VisualCrossingUnavailable
 
 log = logging.getLogger("weather.race")
 api_log = logging.getLogger("server.api")
@@ -82,7 +84,28 @@ STATION_READING_REQUEST_SCHEMA = inline_serializer(
         "wind_speed_ms": serializers.FloatField(required=False),
         "precipitation_mm": serializers.FloatField(required=False),
         "observed_at": serializers.CharField(required=False),
+        "source": serializers.ChoiceField(
+            choices=[choice[0] for choice in WeatherStationReading.SOURCE_CHOICES],
+            required=False,
+        ),
     },
+)
+
+EXTENDED_WEATHER_RESPONSE_SCHEMA = inline_serializer(
+    name="ExtendedWeatherResponse",
+    fields={
+        "source": serializers.CharField(),
+        "cached": serializers.BooleanField(),
+        "request_id": serializers.CharField(),
+        "location": serializers.DictField(),
+        "daily": serializers.ListField(child=serializers.DictField()),
+        "hourly": serializers.ListField(child=serializers.DictField()),
+    },
+)
+
+ERROR_RESPONSE_SCHEMA = inline_serializer(
+    name="WeatherErrorResponse",
+    fields={"detail": serializers.CharField()},
 )
 
 
@@ -510,6 +533,94 @@ class WeatherView(APIView):
         )
 
 
+class ExtendedWeatherView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description=(
+            "Extended forecast from Visual Crossing. This endpoint is cache-first, "
+            "requires JWT auth and is not part of Race / First Complete."
+        ),
+        parameters=[
+            OpenApiParameter("city", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False),
+            OpenApiParameter("lat", OpenApiTypes.FLOAT, OpenApiParameter.QUERY, required=False),
+            OpenApiParameter("lon", OpenApiTypes.FLOAT, OpenApiParameter.QUERY, required=False),
+            OpenApiParameter("days", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False),
+        ],
+        responses={
+            200: EXTENDED_WEATHER_RESPONSE_SCHEMA,
+            400: ERROR_RESPONSE_SCHEMA,
+            401: OpenApiResponse(description="Authentication credentials were not provided."),
+            503: ERROR_RESPONSE_SCHEMA,
+        },
+    )
+    def get(self, request):
+        city = str(request.query_params.get("city", "")).strip()
+        try:
+            latitude = self._optional_float(request.query_params.get("lat"))
+            longitude = self._optional_float(request.query_params.get("lon"))
+        except ValueError:
+            return Response(
+                {"detail": "lat and lon must be valid floating point numbers"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            days = min(max(int(request.query_params.get("days", 7)), 1), 15)
+        except ValueError:
+            return Response({"detail": "days must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if (latitude is None) != (longitude is None):
+            return Response(
+                {"detail": "lat and lon must be provided together"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if latitude is None and longitude is None and not city:
+            return Response(
+                {"detail": "city or lat/lon query parameters are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())[:8]
+        service = ExtendedWeatherService()
+
+        try:
+            payload = service.get_extended_weather(
+                user_id=request.user.pk,
+                city=city,
+                latitude=latitude,
+                longitude=longitude,
+                days=days,
+                request_id=request_id,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except VisualCrossingUnavailable as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except requests.RequestException as exc:
+            api_log.warning(
+                "extended_weather_provider_unavailable request_id=%s user_id=%s error_type=%s",
+                request_id,
+                request.user.pk,
+                type(exc).__name__,
+            )
+            return Response(
+                {"detail": f"Visual Crossing unavailable: {type(exc).__name__}"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response(payload, status=status.HTTP_200_OK)
+
+    @staticmethod
+    def _optional_float(value):
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            raise ValueError("lat and lon must be valid floating point numbers")
+
+
 class AIOutfitRecommendationView(APIView):
     permission_classes = [AllowAny]
 
@@ -680,6 +791,9 @@ class StationReadingIngestView(APIView):
             latitude = self._optional_float(request.data.get("latitude"))
             longitude = self._optional_float(request.data.get("longitude"))
             observed_at = self._parse_observed_at(request.data.get("observed_at"))
+            reading_source = str(request.data.get("source", WeatherStationReading.SOURCE_WIFI_ESP01)).strip()
+            if reading_source not in dict(WeatherStationReading.SOURCE_CHOICES):
+                raise ValueError("invalid source")
         except KeyError as exc:
             return Response(
                 {"detail": f"missing required field: {exc.args[0]}"},
@@ -692,6 +806,7 @@ class StationReadingIngestView(APIView):
             )
 
         reading = WeatherStationReading.objects.create(
+            device=find_device_by_station_id(station_id),
             station_id=station_id,
             latitude=latitude,
             longitude=longitude,
@@ -701,8 +816,10 @@ class StationReadingIngestView(APIView):
             wind_speed_ms=wind_speed_ms,
             precipitation_mm=precipitation_mm,
             observed_at=observed_at,
+            source=reading_source,
             raw_payload=dict(request.data),
         )
+        record_device_reading(reading, ip_address=_request_ip(request))
         store_station_reading_snapshot(reading)
 
         record_system_event(
@@ -713,6 +830,7 @@ class StationReadingIngestView(APIView):
                 "station_id": reading.station_id,
                 "temperature_c": reading.temperature_c,
                 "humidity": reading.humidity,
+                "source": reading.source,
             },
         )
         api_log.info("station_ingest_succeeded station_id=%s reading_id=%s", reading.station_id, reading.pk)
@@ -736,14 +854,97 @@ class StationReadingIngestView(APIView):
         return parsed
 
 
+def _request_ip(request) -> str:
+    forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()
+    return request.META.get("REMOTE_ADDR", "") or ""
+
+
+def _normalize_city_query(city: str) -> str:
+    return (city or "").split(",", 1)[0].strip()
+
+
+def _latest_city_station(city: str) -> tuple[DWDDevice | None, WeatherStationReading | None, str | None]:
+    normalized_city = _normalize_city_query(city)
+    if not normalized_city:
+        return None, None, "No city provided"
+
+    devices = list(
+        DWDDevice.objects.select_related("owner")
+        .filter(city__iexact=normalized_city, is_enabled=True, status=DWDDevice.STATUS_ACTIVE)
+        .order_by("-last_data_at", "-last_seen_at", "-created_at")
+    )
+    if not devices:
+        return None, None, "No active station for this city"
+
+    reading = (
+        WeatherStationReading.objects.select_related("device")
+        .filter(device__in=devices)
+        .order_by("-created_at", "-observed_at")
+        .first()
+    )
+    if reading is None:
+        return devices[0], None, "No readings for this city"
+
+    ttl_seconds = int(getattr(settings, "STATION_READING_TTL_SECONDS", 600))
+    if django_timezone.now() - reading.created_at > timedelta(seconds=ttl_seconds):
+        return reading.device, reading, "Station data is outdated"
+
+    return reading.device, reading, None
+
+
+def _city_latest_payload(city: str) -> dict:
+    device, reading, error = _latest_city_station(city)
+    normalized_city = _normalize_city_query(city) or city
+    if error:
+        return {
+            "available": False,
+            "city": normalized_city,
+            "status": "stale" if error == "Station data is outdated" else "not_found",
+            "message": error,
+            "station": device_station_payload(device, status="stale") if device else None,
+        }
+
+    reading_payload = station_reading_to_payload(reading)
+    return {
+        "available": True,
+        "city": device.city,
+        "station": device_station_payload(device, status="online"),
+        "reading": {
+            "id": reading.pk,
+            "temperature": reading.temperature_c,
+            "temperature_c": reading.temperature_c,
+            "humidity": reading.humidity,
+            "source": reading.source,
+            "created_at": reading.created_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "observed_at": reading_payload["observed_at"],
+        },
+    }
+
+
 class StationLatestView(APIView):
     permission_classes = [AllowAny]
 
     @extend_schema(
-        parameters=[OpenApiParameter("station_id", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False)],
+        parameters=[
+            OpenApiParameter("station_id", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False),
+            OpenApiParameter("city", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False),
+        ],
         responses={200: OpenApiResponse(description="Latest station reading")},
     )
     def get(self, request):
+        city = request.query_params.get("city")
+        if city:
+            payload = _city_latest_payload(city)
+            api_log.info(
+                "station_latest_by_city city=%s available=%s status=%s",
+                city,
+                payload["available"],
+                payload.get("status", "online"),
+            )
+            return Response(payload, status=status.HTTP_200_OK)
+
         station_id = request.query_params.get("station_id", "arduino-1")
         reading = (
             WeatherStationReading.objects
@@ -764,12 +965,12 @@ class StationHistoryView(APIView):
     @extend_schema(
         parameters=[
             OpenApiParameter("station_id", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False),
+            OpenApiParameter("city", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False),
             OpenApiParameter("limit", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False),
         ],
         responses={200: OpenApiResponse(description="Station readings history")},
     )
     def get(self, request):
-        station_id = request.query_params.get("station_id", "arduino-1")
         try:
             limit = min(max(int(request.query_params.get("limit", 100)), 1), 1000)
         except ValueError:
@@ -778,6 +979,46 @@ class StationHistoryView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        city = request.query_params.get("city")
+        if city:
+            device, _latest, error = _latest_city_station(city)
+            if error or device is None:
+                api_log.info("station_history_by_city_empty city=%s reason=%s", city, error)
+                return Response(
+                    {
+                        "available": False,
+                        "city": _normalize_city_query(city) or city,
+                        "status": "stale" if error == "Station data is outdated" else "not_found",
+                        "message": error or "No active station for this city",
+                        "results": [],
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            readings = (
+                WeatherStationReading.objects
+                .filter(device=device)
+                .order_by("-observed_at", "-created_at")[:limit]
+            )
+            data = [station_reading_to_payload(reading) for reading in reversed(list(readings))]
+            api_log.info(
+                "station_history_by_city_succeeded city=%s device_id=%s limit=%s results=%s",
+                city,
+                device.pk,
+                limit,
+                len(data),
+            )
+            return Response(
+                {
+                    "available": True,
+                    "city": device.city,
+                    "station": device_station_payload(device, status="online"),
+                    "results": data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        station_id = request.query_params.get("station_id", "arduino-1")
         readings = (
             WeatherStationReading.objects
             .filter(station_id=station_id)

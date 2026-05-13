@@ -2,6 +2,7 @@ from django.urls import path
 
 from .admin_views import (
     AdminDashboardView,
+    AdminIotConfigView,
     AdminIotStatusView,
     AdminLogsView,
     AdminProviderCheckView,
@@ -32,6 +33,7 @@ from .views import (
     StationHistoryView,
     StationLatestView,
     StationReadingIngestView,
+    ExtendedWeatherView,
     WeatherHistoryView,
     WeatherView,
     health,
@@ -43,6 +45,7 @@ urlpatterns = [
     path("admin/providers/status/", AdminProvidersStatusView.as_view(), name="admin_providers_status"),
     path("admin/providers/check/", AdminProviderCheckView.as_view(), name="admin_provider_check"),
     path("admin/race/stats/", AdminRaceStatsView.as_view(), name="admin_race_stats"),
+    path("admin/iot/config/", AdminIotConfigView.as_view(), name="admin_iot_config"),
     path("admin/iot/status/", AdminIotStatusView.as_view(), name="admin_iot_status"),
     path("admin/logs/", AdminLogsView.as_view(), name="admin_logs"),
     path("admin/dwd/users/", AdminDWDUsersView.as_view(), name="admin_dwd_users"),
@@ -85,6 +88,8 @@ urlpatterns = [
     path("geocode/", GeocodeView.as_view(), name="geocode_slash"),
     path("weather", WeatherView.as_view(), name="weather"),
     path("weather/", WeatherView.as_view(), name="weather_slash"),
+    path("weather/extended", ExtendedWeatherView.as_view(), name="weather_extended"),
+    path("weather/extended/", ExtendedWeatherView.as_view(), name="weather_extended_slash"),
     path("weather/history", WeatherHistoryView.as_view(), name="weather_history"),
     path("weather/history/", WeatherHistoryView.as_view(), name="weather_history_slash"),
     path("ai/outfit-recommendation", AIOutfitRecommendationView.as_view(), name="ai_outfit_recommendation"),

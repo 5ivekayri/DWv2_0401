@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -10,7 +10,22 @@ from django.core.cache import cache
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from server.models import DWDDevice, DWDDeviceEvent, DWDProviderApplication, DWDProvisioning, WeatherHourlySnapshot
+from django.utils import timezone as django_timezone
+
+from server.models import (
+    DWDDevice,
+    DWDDeviceEvent,
+    DWDProviderApplication,
+    DWDProvisioning,
+    ExtendedWeatherSnapshot,
+    IoTConfiguration,
+    ProviderHealth,
+    SystemEvent,
+    WeatherStationReading,
+    WeatherHourlySnapshot,
+)
+from server.iot.config import get_iot_config
+from server.iot.serial_bridge import SerialArduinoReader, parse_serial_line
 from server.weather.contracts import WeatherPoint
 from server.weather.storage import get_hour_bucket, normalize_coordinate
 
@@ -121,6 +136,7 @@ class WeatherApiTests(TestCase):
         self.assertTrue(stats.data["last_request_id"])
         openmeteo = next(item for item in stats.data["providers"] if item["name"] == "openmeteo")
         self.assertGreaterEqual(openmeteo["win_count"], 1)
+        self.assertNotIn("visual_crossing", {item["name"] for item in stats.data["providers"]})
 
     def test_weather_history_requires_jwt_and_returns_points(self):
         user = get_user_model().objects.create_user(username="tester", password="password123")
@@ -192,6 +208,95 @@ class WeatherApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["source"], "db")
 
+    def test_extended_weather_requires_auth(self):
+        response = self.client.get("/api/weather/extended/", {"lat": "54.1838", "lon": "45.1749", "days": "7"})
+
+        self.assertEqual(response.status_code, 401)
+
+    @override_settings(VISUAL_CROSSING_API_KEY="test-key")
+    def test_extended_weather_uses_fresh_db_snapshot_without_provider_call(self):
+        user = get_user_model().objects.create_user(username="extended-user", password="password123")
+        ExtendedWeatherSnapshot.objects.create(
+            city="Saransk",
+            location="Saransk, Russia",
+            latitude=normalize_coordinate(54.1838),
+            longitude=normalize_coordinate(45.1749),
+            source="visual_crossing",
+            forecast_days=7,
+            payload_json={"provider": "visual_crossing"},
+            normalized_daily_json=[
+                {
+                    "date": "2026-05-12",
+                    "temp_min": 8.2,
+                    "temp_max": 17.4,
+                    "humidity": 65,
+                    "wind_speed": 5.1,
+                    "precip_probability": 40,
+                    "conditions": "Rain",
+                }
+            ],
+            normalized_hourly_json=[],
+            expires_at=django_timezone.now() + timedelta(hours=1),
+        )
+
+        self.client.force_authenticate(user=user)
+        with patch("server.weather.visual_crossing.VisualCrossingClient.fetch_forecast") as fetch_forecast:
+            response = self.client.get(
+                "/api/weather/extended/",
+                {"lat": "54.1838", "lon": "45.1749", "days": "7"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["cached"])
+        self.assertEqual(response.data["source"], "visual_crossing")
+        self.assertEqual(response.data["daily"][0]["conditions"], "Rain")
+        fetch_forecast.assert_not_called()
+
+    @override_settings(VISUAL_CROSSING_API_KEY="test-key")
+    def test_extended_weather_calls_visual_crossing_once_and_reuses_db(self):
+        user = get_user_model().objects.create_user(username="extended-live", password="password123")
+        payload = {
+            "resolvedAddress": "Saransk, Mordovia, Russia",
+            "days": [
+                {
+                    "datetime": "2026-05-12",
+                    "tempmin": 8.2,
+                    "tempmax": 17.4,
+                    "humidity": 65,
+                    "windspeed": 18.36,
+                    "precipprob": 40,
+                    "conditions": "Rain",
+                    "hours": [
+                        {
+                            "datetime": "12:00:00",
+                            "temp": 13.1,
+                            "humidity": 60,
+                            "windspeed": 10.8,
+                            "precipprob": 20,
+                            "conditions": "Cloudy",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        self.client.force_authenticate(user=user)
+        with patch("server.weather.visual_crossing.VisualCrossingClient.fetch_forecast", return_value=payload) as fetch_forecast:
+            first = self.client.get("/api/weather/extended/", {"lat": "54.1838", "lon": "45.1749", "days": "7"})
+            second = self.client.get("/api/weather/extended/", {"lat": "54.1838", "lon": "45.1749", "days": "7"})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertFalse(first.data["cached"])
+        self.assertEqual(first.data["daily"][0]["wind_speed"], 5.1)
+        self.assertEqual(first.data["hourly"][0]["date"], "2026-05-12")
+        self.assertEqual(first.data["hourly"][0]["time"], "12:00")
+        self.assertEqual(first.data["hourly"][0]["wind_speed"], 3.0)
+        self.assertEqual(second.status_code, 200)
+        self.assertTrue(second.data["cached"])
+        self.assertEqual(second.data["hourly"][0]["time"], "12:00")
+        fetch_forecast.assert_called_once()
+        self.assertEqual(ExtendedWeatherSnapshot.objects.filter(source="visual_crossing").count(), 1)
+
     def test_station_ingest_latest_and_history(self):
         payload = {
             "station_id": "arduino-test",
@@ -212,7 +317,291 @@ class WeatherApiTests(TestCase):
         self.assertEqual(created.status_code, 201)
         self.assertEqual(latest.status_code, 200)
         self.assertEqual(history.status_code, 200)
+        self.assertEqual(latest.data["source"], WeatherStationReading.SOURCE_WIFI_ESP01)
         self.assertEqual(len(history.data["results"]), 1)
+
+    def test_serial_bridge_parses_json_and_saves_common_station_reading(self):
+        config = get_iot_config()
+        config.connection_mode = IoTConfiguration.CONNECTION_SERIAL_BRIDGE
+        config.serial_enabled = True
+        config.serial_port = "COM3"
+        config.baud_rate = 9600
+        config.serial_status = IoTConfiguration.SERIAL_STATUS_DISCONNECTED
+        config.save()
+
+        reading = SerialArduinoReader(config=config).save_line('{"temperature":23.5,"humidity":48}')
+
+        self.assertEqual(reading.source, WeatherStationReading.SOURCE_SERIAL_BRIDGE)
+        self.assertEqual(reading.temperature_c, 23.5)
+        self.assertEqual(reading.humidity, 48)
+        self.assertTrue(
+            WeatherStationReading.objects.filter(
+                pk=reading.pk,
+                source=WeatherStationReading.SOURCE_SERIAL_BRIDGE,
+            ).exists()
+        )
+
+        latest = self.client.get("/api/station/latest", {"station_id": "arduino-1"})
+        history = self.client.get("/api/station/history", {"station_id": "arduino-1", "limit": "10"})
+
+        self.assertEqual(latest.status_code, 200)
+        self.assertEqual(latest.data["source"], WeatherStationReading.SOURCE_SERIAL_BRIDGE)
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(history.data["results"][-1]["source"], WeatherStationReading.SOURCE_SERIAL_BRIDGE)
+
+    def test_serial_bridge_parses_key_value_format(self):
+        payload = parse_serial_line("temperature=23.5;humidity=48")
+
+        self.assertEqual(payload.temperature_c, 23.5)
+        self.assertEqual(payload.humidity, 48)
+
+    def test_serial_bridge_converts_fahrenheit_when_unit_is_explicit(self):
+        payload = parse_serial_line('{"temperature":78.8,"humidity":48,"unit":"fahrenheit"}')
+
+        self.assertAlmostEqual(payload.temperature_c, 26.0, places=1)
+
+    def test_serial_bridge_linked_device_saves_fk_and_logs_normalized_temperature(self):
+        owner = get_user_model().objects.create_user(username="serial-owner", password="password123")
+        device = DWDDevice.objects.create(
+            owner=owner,
+            device_code="DWD Saransk Station",
+            station_id="DWD-SARANSK-001",
+            city="Saransk",
+            status=DWDDevice.STATUS_ACTIVE,
+            firmware_type=WeatherStationReading.SOURCE_SERIAL_BRIDGE,
+        )
+        config = get_iot_config()
+        config.connection_mode = IoTConfiguration.CONNECTION_SERIAL_BRIDGE
+        config.serial_enabled = True
+        config.linked_device = device
+        config.serial_status = IoTConfiguration.SERIAL_STATUS_CONNECTED
+        config.save()
+
+        reading = SerialArduinoReader(config=config).save_line(
+            '{"station_id":"DWD-SARANSK-001","temperature":26.0,"humidity":48,"source":"serial_bridge","unit":"celsius"}'
+        )
+
+        device.refresh_from_db()
+        self.assertIsNotNone(reading)
+        self.assertEqual(reading.device_id, device.pk)
+        self.assertEqual(reading.station_id, "DWD-SARANSK-001")
+        self.assertEqual(reading.temperature_c, 26.0)
+        self.assertEqual(reading.humidity, 48)
+        self.assertIsNotNone(device.last_data_at)
+        parsed_event = SystemEvent.objects.get(event="serial_bridge_reading_parsed")
+        self.assertEqual(parsed_event.payload["raw_temperature"], 26.0)
+        self.assertEqual(parsed_event.payload["normalized_temperature"], 26.0)
+        self.assertEqual(parsed_event.payload["station_id"], "DWD-SARANSK-001")
+
+    def test_serial_bridge_rejects_mismatched_station_id_for_linked_device(self):
+        owner = get_user_model().objects.create_user(username="serial-mismatch", password="password123")
+        device = DWDDevice.objects.create(
+            owner=owner,
+            device_code="DWD Saransk Station",
+            station_id="DWD-SARANSK-001",
+            city="Saransk",
+            status=DWDDevice.STATUS_ACTIVE,
+            firmware_type=WeatherStationReading.SOURCE_SERIAL_BRIDGE,
+        )
+        config = get_iot_config()
+        config.connection_mode = IoTConfiguration.CONNECTION_SERIAL_BRIDGE
+        config.serial_enabled = True
+        config.linked_device = device
+        config.serial_status = IoTConfiguration.SERIAL_STATUS_CONNECTED
+        config.save()
+
+        reading = SerialArduinoReader(config=config).save_line(
+            '{"station_id":"OTHER-STATION","temperature":26.0,"humidity":48,"source":"serial_bridge"}'
+        )
+
+        config.refresh_from_db()
+        self.assertIsNone(reading)
+        self.assertEqual(config.serial_status, IoTConfiguration.SERIAL_STATUS_CONNECTED)
+        self.assertFalse(WeatherStationReading.objects.exists())
+        self.assertTrue(
+            SystemEvent.objects.filter(
+                event="serial_bridge_parse_failed",
+                message__contains="does not match linked device",
+            ).exists()
+        )
+
+    def test_station_latest_by_city_uses_active_dwd_device_reading(self):
+        owner = get_user_model().objects.create_user(username="city-station-owner", password="password123")
+        device = DWDDevice.objects.create(
+            owner=owner,
+            device_code="DWD Saransk Station",
+            station_id="DWD-SARANSK-001",
+            city="Saransk",
+            status=DWDDevice.STATUS_ACTIVE,
+            is_enabled=True,
+            firmware_type=WeatherStationReading.SOURCE_SERIAL_BRIDGE,
+        )
+        WeatherStationReading.objects.create(
+            device=device,
+            station_id=device.station_id,
+            temperature_c=26.0,
+            humidity=48,
+            wind_speed_ms=0.0,
+            precipitation_mm=0.0,
+            observed_at=django_timezone.now(),
+            source=WeatherStationReading.SOURCE_SERIAL_BRIDGE,
+        )
+
+        latest = self.client.get("/api/station/latest", {"city": "Saransk, Russia"})
+        history = self.client.get("/api/station/history", {"city": "Saransk, Russia", "limit": "10"})
+
+        self.assertEqual(latest.status_code, 200)
+        self.assertTrue(latest.data["available"])
+        self.assertEqual(latest.data["station"]["station_id"], "DWD-SARANSK-001")
+        self.assertEqual(latest.data["reading"]["temperature"], 26.0)
+        self.assertEqual(latest.data["reading"]["humidity"], 48)
+        self.assertEqual(history.status_code, 200)
+        self.assertTrue(history.data["available"])
+        self.assertEqual(history.data["results"][-1]["device_id"], device.pk)
+
+    def test_station_latest_by_city_without_station_returns_soft_empty_response(self):
+        response = self.client.get("/api/station/latest", {"city": "NoStationCity"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["available"])
+        self.assertEqual(response.data["message"], "No active station for this city")
+
+    def test_serial_bridge_ignores_sensor_error_without_stopping_reader(self):
+        config = get_iot_config()
+        config.connection_mode = IoTConfiguration.CONNECTION_SERIAL_BRIDGE
+        config.serial_enabled = True
+        config.serial_status = IoTConfiguration.SERIAL_STATUS_CONNECTED
+        config.save()
+
+        reading = SerialArduinoReader(config=config).save_line('{"error":"dht_read_failed"}')
+
+        config.refresh_from_db()
+        self.assertIsNone(reading)
+        self.assertEqual(config.serial_status, IoTConfiguration.SERIAL_STATUS_CONNECTED)
+        self.assertFalse(WeatherStationReading.objects.exists())
+        self.assertTrue(
+            SystemEvent.objects.filter(
+                event="serial_bridge_parse_failed",
+                source="serial_bridge",
+                message__contains="dht_read_failed",
+            ).exists()
+        )
+
+    def test_serial_bridge_ignores_invalid_json_without_stopping_reader(self):
+        config = get_iot_config()
+        config.connection_mode = IoTConfiguration.CONNECTION_SERIAL_BRIDGE
+        config.serial_enabled = True
+        config.serial_status = IoTConfiguration.SERIAL_STATUS_CONNECTED
+        config.save()
+
+        reading = SerialArduinoReader(config=config).save_line('{"temperature":')
+
+        config.refresh_from_db()
+        self.assertIsNone(reading)
+        self.assertEqual(config.serial_status, IoTConfiguration.SERIAL_STATUS_CONNECTED)
+        self.assertFalse(WeatherStationReading.objects.exists())
+        self.assertTrue(SystemEvent.objects.filter(event="serial_bridge_parse_failed").exists())
+
+    def test_serial_bridge_read_loop_logs_open_attempt_raw_line_and_received_data(self):
+        config = get_iot_config()
+        config.connection_mode = IoTConfiguration.CONNECTION_SERIAL_BRIDGE
+        config.serial_enabled = True
+        config.serial_port = "COM6"
+        config.baud_rate = 9600
+        config.serial_status = IoTConfiguration.SERIAL_STATUS_DISCONNECTED
+        config.save()
+
+        class FakeSerialConnection:
+            def __init__(self, port, baud_rate, timeout):
+                self.port = port
+                self.baud_rate = baud_rate
+                self.timeout = timeout
+                self.calls = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def readline(self):
+                self.calls += 1
+                config.serial_enabled = False
+                config.save(update_fields=["serial_enabled", "updated_at"])
+                return b'{"temperature":26.0,"humidity":48,"source":"serial_bridge"}\n'
+
+        fake_serial = SimpleNamespace(Serial=FakeSerialConnection)
+
+        with patch("server.iot.serial_bridge.importlib.import_module", return_value=fake_serial):
+            SerialArduinoReader(config=config)._read_loop_once()
+
+        self.assertTrue(SystemEvent.objects.filter(event="serial_bridge_open_attempted", payload__port="COM6").exists())
+        self.assertTrue(SystemEvent.objects.filter(event="serial_bridge_connected", payload__port="COM6").exists())
+        raw_event = SystemEvent.objects.get(event="serial_bridge_raw_line_received")
+        self.assertEqual(raw_event.payload["raw_line"], '{"temperature":26.0,"humidity":48,"source":"serial_bridge"}')
+        self.assertEqual(raw_event.payload["raw_bytes_length"], 60)
+        self.assertTrue(SystemEvent.objects.filter(event="serial_bridge_reading_received").exists())
+        self.assertEqual(WeatherStationReading.objects.get().temperature_c, 26.0)
+
+    @override_settings(SERIAL_BRIDGE_EMPTY_READ_LOG_INTERVAL_SECONDS=0)
+    def test_serial_bridge_read_loop_logs_timeout_when_no_data_arrives(self):
+        config = get_iot_config()
+        config.connection_mode = IoTConfiguration.CONNECTION_SERIAL_BRIDGE
+        config.serial_enabled = True
+        config.serial_port = "COM6"
+        config.baud_rate = 9600
+        config.serial_status = IoTConfiguration.SERIAL_STATUS_DISCONNECTED
+        config.save()
+
+        class EmptySerialConnection:
+            def __init__(self, port, baud_rate, timeout):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def readline(self):
+                config.serial_enabled = False
+                config.save(update_fields=["serial_enabled", "updated_at"])
+                return b""
+
+        fake_serial = SimpleNamespace(Serial=EmptySerialConnection)
+
+        with patch("server.iot.serial_bridge.importlib.import_module", return_value=fake_serial):
+            SerialArduinoReader(config=config)._read_loop_once()
+
+        timeout_event = SystemEvent.objects.get(event="serial_bridge_readline_timeout")
+        self.assertEqual(timeout_event.level, SystemEvent.LEVEL_WARNING)
+        self.assertEqual(timeout_event.payload["port"], "COM6")
+        self.assertFalse(WeatherStationReading.objects.exists())
+
+    def test_serial_bridge_read_loop_logs_port_error_when_com_port_is_unavailable(self):
+        config = get_iot_config()
+        config.connection_mode = IoTConfiguration.CONNECTION_SERIAL_BRIDGE
+        config.serial_enabled = True
+        config.serial_port = "COM6"
+        config.baud_rate = 9600
+        config.serial_status = IoTConfiguration.SERIAL_STATUS_DISCONNECTED
+        config.save()
+
+        def raise_port_error(*_args, **_kwargs):
+            raise OSError("Access is denied")
+
+        fake_serial = SimpleNamespace(Serial=raise_port_error)
+
+        with patch("server.iot.serial_bridge.time.sleep"):
+            with patch("server.iot.serial_bridge.importlib.import_module", return_value=fake_serial):
+                SerialArduinoReader(config=config)._read_loop_once()
+
+        config.refresh_from_db()
+        self.assertEqual(config.serial_status, IoTConfiguration.SERIAL_STATUS_ERROR)
+        self.assertIn("Access is denied", config.serial_last_error)
+        self.assertTrue(SystemEvent.objects.filter(event="serial_bridge_open_attempted", payload__port="COM6").exists())
+        self.assertTrue(SystemEvent.objects.filter(event="serial_bridge_port_error", message__contains="Access is denied").exists())
+        self.assertTrue(SystemEvent.objects.filter(event="serial_bridge_disconnected", payload__error__contains="Access is denied").exists())
 
 
 @override_settings(CACHES=LOC_MEM_CACHE)
@@ -247,7 +636,25 @@ class AdminMonitoringApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         names = {item["name"] for item in response.data}
-        self.assertTrue({"openmeteo", "openweather", "yandex"}.issubset(names))
+        self.assertTrue({"openmeteo", "openweather", "yandex", "visual_crossing"}.issubset(names))
+        visual_crossing = next(item for item in response.data if item["name"] == "visual_crossing")
+        self.assertFalse(visual_crossing["race_enabled"])
+        self.assertTrue(visual_crossing["rich_provider"])
+
+    def test_race_stats_excludes_visual_crossing_provider_health(self):
+        ProviderHealth.objects.create(
+            name="visual_crossing",
+            enabled=True,
+            status=ProviderHealth.STATUS_OK,
+            success_count=5,
+            win_count=5,
+        )
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.get("/api/admin/race/stats/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("visual_crossing", {item["name"] for item in response.data["providers"]})
 
     def test_provider_check_returns_json_error_instead_of_500(self):
         class FailingProvider:
@@ -295,6 +702,79 @@ class AdminMonitoringApiTests(TestCase):
         self.assertEqual(response.data["status"], "online")
         self.assertEqual(response.data["last_reading"]["temperature"], 22.0)
         self.assertEqual(response.data["last_reading"]["humidity"], 45.0)
+        self.assertEqual(response.data["last_reading"]["source"], WeatherStationReading.SOURCE_WIFI_ESP01)
+
+    def test_iot_config_requires_admin_and_updates_serial_bridge(self):
+        device = DWDDevice.objects.create(
+            owner=self.admin,
+            device_code="DWD Saransk Station",
+            station_id="DWD-SARANSK-001",
+            city="Saransk",
+            status=DWDDevice.STATUS_INACTIVE,
+            is_enabled=False,
+        )
+        anonymous = self.client.get("/api/admin/iot/config/")
+        self.assertEqual(anonymous.status_code, 401)
+
+        self.client.force_authenticate(user=self.user)
+        forbidden = self.client.patch(
+            "/api/admin/iot/config/",
+            {
+                "connection_mode": "serial_bridge",
+                "serial_port": "COM3",
+                "baud_rate": 9600,
+                "linked_device_id": device.pk,
+                "enabled": True,
+            },
+            format="json",
+        )
+        self.assertEqual(forbidden.status_code, 403)
+
+        self.client.force_authenticate(user=self.admin)
+        updated = self.client.patch(
+            "/api/admin/iot/config/",
+            {
+                "connection_mode": "serial_bridge",
+                "serial_port": "COM3",
+                "baud_rate": 9600,
+                "linked_device_id": device.pk,
+                "enabled": True,
+            },
+            format="json",
+        )
+        fetched = self.client.get("/api/admin/iot/config/")
+
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.data["connection_mode"], IoTConfiguration.CONNECTION_SERIAL_BRIDGE)
+        self.assertEqual(updated.data["serial_port"], "COM3")
+        self.assertEqual(updated.data["baud_rate"], 9600)
+        self.assertEqual(updated.data["linked_device"]["id"], device.pk)
+        self.assertEqual(updated.data["linked_device"]["city"], "Saransk")
+        self.assertTrue(updated.data["enabled"])
+        self.assertEqual(fetched.status_code, 200)
+        self.assertEqual(fetched.data["serial"]["status"], IoTConfiguration.SERIAL_STATUS_DISCONNECTED)
+        self.assertEqual(fetched.data["serial"]["linked_device"]["station_id"], "DWD-SARANSK-001")
+        device.refresh_from_db()
+        self.assertEqual(device.status, DWDDevice.STATUS_ACTIVE)
+        self.assertTrue(device.is_enabled)
+
+    def test_iot_status_includes_serial_bridge_status(self):
+        config = get_iot_config()
+        config.connection_mode = IoTConfiguration.CONNECTION_SERIAL_BRIDGE
+        config.serial_enabled = True
+        config.serial_port = "COM3"
+        config.baud_rate = 9600
+        config.serial_status = IoTConfiguration.SERIAL_STATUS_CONNECTED
+        config.save()
+
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get("/api/admin/iot/status/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["connection_mode"], IoTConfiguration.CONNECTION_SERIAL_BRIDGE)
+        self.assertEqual(response.data["serial"]["port"], "COM3")
+        self.assertEqual(response.data["serial"]["baud_rate"], 9600)
+        self.assertEqual(response.data["serial"]["status"], IoTConfiguration.SERIAL_STATUS_CONNECTED)
 
 
 @override_settings(CACHES=LOC_MEM_CACHE)

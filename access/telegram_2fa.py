@@ -162,7 +162,7 @@ def send_setup_code_for_telegram_user(telegram_username: str, chat_id: str) -> T
     )
     send_telegram_message(
         str(chat_id),
-        f"Код привязки DW Погода: {code}. Он действует 10 минут.",
+        f"Код привязки Dark Weather: {code}. Он действует 10 минут.",
     )
     challenge.sent_at = timezone.now()
     challenge.save(update_fields=["sent_at"])
@@ -235,7 +235,7 @@ def issue_login_challenge(user) -> dict:
     )
     send_telegram_message(
         settings_obj.telegram_chat_id,
-        f"Код входа DW Погода: {code}. Он действует 10 минут.",
+        f"Код входа Dark Weather: {code}. Он действует 10 минут.",
     )
     challenge.sent_at = timezone.now()
     challenge.save(update_fields=["sent_at"])

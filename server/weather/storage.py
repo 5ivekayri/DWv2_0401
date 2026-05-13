@@ -146,16 +146,19 @@ def store_weather_point(
 def station_reading_to_payload(reading: WeatherStationReading) -> dict:
     return {
         "id": reading.id,
+        "device_id": reading.device_id,
         "station_id": reading.station_id,
         "latitude": reading.latitude,
         "longitude": reading.longitude,
+        "temperature": reading.temperature_c,
         "temperature_c": reading.temperature_c,
         "humidity": reading.humidity,
         "pressure_hpa": reading.pressure_hpa,
         "wind_speed_ms": reading.wind_speed_ms,
         "precipitation_mm": reading.precipitation_mm,
         "observed_at": reading.observed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "source": "arduino",
+        "created_at": reading.created_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "source": reading.source,
         "data_source": WeatherHourlySnapshot.SOURCE_IOT_MQTT,
     }
 
@@ -181,7 +184,7 @@ def store_station_reading_snapshot(reading: WeatherStationReading) -> None:
             "wind_speed_ms": reading.wind_speed_ms,
             "precipitation_mm": reading.precipitation_mm,
             "observed_at": reading.observed_at,
-            "provider": "arduino",
+            "provider": reading.source,
             "raw_payload": payload,
         },
     )
