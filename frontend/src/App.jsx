@@ -50,6 +50,7 @@ import {
   listAdminDwdProvisioning,
   listAdminDwdUsers,
   listAdminLogs,
+  listStationRequests,
   listProviderApplications,
   login,
   markDwdProvisioningSent,
@@ -114,6 +115,12 @@ const DEFAULT_IOT_CONFIG_FORM = {
   baud_rate: 9600,
   linked_device_id: "",
   enabled: false,
+  mqtt_enabled: false,
+  mqtt_host: "127.0.0.1",
+  mqtt_port: 1883,
+  mqtt_topic: "weather/station",
+  mqtt_username: "",
+  mqtt_password: "",
 };
 
 function logUi(event, details = {}) {
@@ -171,6 +178,12 @@ function toIotConfigForm(config = {}) {
     baud_rate: Number(config.baud_rate || config.serial?.baud_rate || DEFAULT_IOT_CONFIG_FORM.baud_rate),
     linked_device_id: config.linked_device?.id ? String(config.linked_device.id) : "",
     enabled: Boolean(config.enabled ?? config.serial?.enabled),
+    mqtt_enabled: Boolean(config.mqtt?.enabled),
+    mqtt_host: config.mqtt?.host || DEFAULT_IOT_CONFIG_FORM.mqtt_host,
+    mqtt_port: Number(config.mqtt?.port || DEFAULT_IOT_CONFIG_FORM.mqtt_port),
+    mqtt_topic: config.mqtt?.topic || DEFAULT_IOT_CONFIG_FORM.mqtt_topic,
+    mqtt_username: config.mqtt?.username || "",
+    mqtt_password: "",
   };
 }
 
@@ -225,6 +238,7 @@ function App() {
   const [adminDwdProvisioning, setAdminDwdProvisioning] = useState([]);
   const [adminDwdEvents, setAdminDwdEvents] = useState([]);
   const [adminSerialLogs, setAdminSerialLogs] = useState([]);
+  const [adminStationRequests, setAdminStationRequests] = useState([]);
   const [adminIotConfig, setAdminIotConfig] = useState(null);
   const [adminIotStatus, setAdminIotStatus] = useState(null);
   const [iotConfigForm, setIotConfigForm] = useState(DEFAULT_IOT_CONFIG_FORM);
@@ -264,6 +278,7 @@ function App() {
       setAdminDwdProvisioning([]);
       setAdminDwdEvents([]);
       setAdminSerialLogs([]);
+      setAdminStationRequests([]);
       setAdminIotConfig(null);
       setAdminIotStatus(null);
       setIotConfigForm(DEFAULT_IOT_CONFIG_FORM);
@@ -710,13 +725,14 @@ function App() {
     }
 
     try {
-      const [users, applications, devices, provisioning, events, serialLogs, iotConfig, iotStatus] = await Promise.all([
+      const [users, applications, devices, provisioning, events, serialLogs, stationRequests, iotConfig, iotStatus] = await Promise.all([
         listAdminDwdUsers(nextTokens),
         listAdminDwdApplications(nextTokens),
         listAdminDwdDevices(nextTokens),
         listAdminDwdProvisioning(nextTokens),
         listAdminDwdDeviceEvents(nextTokens, { limit: 200 }),
         listAdminLogs(nextTokens, { source: "serial_bridge", limit: 100 }),
+        listStationRequests(nextTokens, { limit: 100 }),
         getAdminIotConfig(nextTokens),
         getAdminIotStatus(nextTokens),
       ]);
@@ -726,6 +742,7 @@ function App() {
       setAdminDwdProvisioning(Array.isArray(provisioning) ? provisioning : []);
       setAdminDwdEvents(Array.isArray(events) ? events : []);
       setAdminSerialLogs(Array.isArray(serialLogs) ? serialLogs : []);
+      setAdminStationRequests(Array.isArray(stationRequests?.results) ? stationRequests.results : []);
       setAdminIotConfig(iotConfig || null);
       setAdminIotStatus(iotStatus || null);
       setIotConfigForm(toIotConfigForm(iotConfig));
@@ -738,6 +755,7 @@ function App() {
         setAdminDwdProvisioning([]);
         setAdminDwdEvents([]);
         setAdminSerialLogs([]);
+        setAdminStationRequests([]);
         setAdminIotConfig(null);
         setAdminIotStatus(null);
         setIotConfigForm(DEFAULT_IOT_CONFIG_FORM);
@@ -913,7 +931,15 @@ function App() {
       baud_rate: Number(iotConfigForm.baud_rate) || 9600,
       linked_device_id: iotConfigForm.linked_device_id ? Number(iotConfigForm.linked_device_id) : null,
       enabled: Boolean(iotConfigForm.enabled),
+      mqtt_enabled: Boolean(iotConfigForm.mqtt_enabled),
+      mqtt_host: iotConfigForm.mqtt_host.trim(),
+      mqtt_port: Number(iotConfigForm.mqtt_port) || 1883,
+      mqtt_topic: iotConfigForm.mqtt_topic.trim(),
+      mqtt_username: iotConfigForm.mqtt_username.trim(),
     };
+    if (iotConfigForm.mqtt_password) {
+      payload.mqtt_password = iotConfigForm.mqtt_password;
+    }
 
     await runTask("dwd", async () => {
       const updated = await updateAdminIotConfig(payload, tokens);
@@ -1046,6 +1072,7 @@ function App() {
           provisioningRecords={adminDwdProvisioning}
           events={adminDwdEvents}
           serialLogs={adminSerialLogs}
+          stationRequests={adminStationRequests}
           iotConfig={adminIotConfig}
           iotStatus={adminIotStatus}
           iotConfigForm={iotConfigForm}
@@ -1482,6 +1509,7 @@ function AdminPanelPage({
   provisioningRecords,
   events,
   serialLogs,
+  stationRequests,
   iotConfig,
   iotStatus,
   iotConfigForm,
@@ -1569,6 +1597,7 @@ function AdminPanelPage({
           form={iotConfigForm}
           devices={devices}
           serialLogs={serialLogs}
+          stationRequests={stationRequests}
           loading={loading}
           onFieldChange={onIotConfigFieldChange}
           onSubmit={onIotConfigSubmit}
@@ -1907,8 +1936,9 @@ function AdminDeviceEventsPage({ events, devices }) {
   );
 }
 
-function AdminSerialBridgePage({ iotConfig, iotStatus, form, devices = [], serialLogs = [], loading, onFieldChange, onSubmit }) {
+function AdminSerialBridgePage({ iotConfig, iotStatus, form, devices = [], serialLogs = [], stationRequests = [], loading, onFieldChange, onSubmit }) {
   const serial = iotStatus?.serial || iotConfig?.serial || {};
+  const mqtt = iotStatus?.mqtt || iotConfig?.mqtt || {};
   const lastReading = iotStatus?.last_reading || null;
   const lastTemperature = lastReading?.temperature_c ?? lastReading?.temperature;
   const linkedDevice = devices.find((device) => String(device.id) === String(form.linked_device_id)) || iotConfig?.linked_device || null;
@@ -1941,6 +1971,7 @@ function AdminSerialBridgePage({ iotConfig, iotStatus, form, devices = [], seria
               <option value="wifi_esp01">ESP-01 Wi-Fi</option>
               <option value="serial_bridge">Serial Bridge</option>
               <option value="ethernet_shield">Ethernet Shield</option>
+              <option value="mqtt">MQTT</option>
             </select>
           </label>
           <label>
@@ -1997,9 +2028,114 @@ function AdminSerialBridgePage({ iotConfig, iotStatus, form, devices = [], seria
         </form>
       </AdminTableCard>
 
+      <AdminTableCard title="MQTT" icon={<Waves size={20} />}>
+        <div className="detail-grid serial-status-grid">
+          <Metric icon={<Activity size={18} />} label="Broker status" value={statusLabel(mqtt.broker_status || mqtt.status || "unknown")} />
+          <Metric icon={<Cpu size={18} />} label="Broker" value={`${mqtt.host || form.mqtt_host}:${mqtt.port || form.mqtt_port || 1883}`} />
+          <Metric icon={<Radio size={18} />} label="Topic" value={mqtt.topic || form.mqtt_topic || "weather/station"} />
+          <Metric icon={<RefreshCw size={18} />} label="Last message" value={formatDate(mqtt.last_seen)} />
+          <Metric icon={<FileText size={18} />} label="Last error" value={mqtt.last_error || "none"} />
+          <Metric icon={<ShieldCheck size={18} />} label="Auth" value={mqtt.username ? `user: ${mqtt.username}` : "anonymous"} />
+        </div>
+
+        <form className="dwd-form compact-form serial-config-form" onSubmit={onSubmit}>
+          <label className="checkbox-row serial-enabled-row">
+            <input
+              type="checkbox"
+              checked={form.mqtt_enabled}
+              onChange={(event) => onFieldChange("mqtt_enabled", event.target.checked)}
+            />
+            <span>Enable MQTT listener</span>
+          </label>
+          <label>
+            <span>MQTT host</span>
+            <input
+              value={form.mqtt_host}
+              onChange={(event) => onFieldChange("mqtt_host", event.target.value)}
+              placeholder="127.0.0.1"
+            />
+          </label>
+          <label>
+            <span>MQTT port</span>
+            <input
+              type="number"
+              min="1"
+              max="65535"
+              value={form.mqtt_port}
+              onChange={(event) => onFieldChange("mqtt_port", Number(event.target.value))}
+            />
+          </label>
+          <label className="wide-field">
+            <span>MQTT topic</span>
+            <input
+              value={form.mqtt_topic}
+              onChange={(event) => onFieldChange("mqtt_topic", event.target.value)}
+              placeholder="weather/station or darkweather/stations/+/readings"
+            />
+          </label>
+          <label>
+            <span>MQTT username</span>
+            <input
+              value={form.mqtt_username}
+              onChange={(event) => onFieldChange("mqtt_username", event.target.value)}
+              placeholder="optional"
+            />
+          </label>
+          <label>
+            <span>MQTT password</span>
+            <input
+              type="password"
+              value={form.mqtt_password}
+              onChange={(event) => onFieldChange("mqtt_password", event.target.value)}
+              placeholder={mqtt.has_password ? "saved; leave blank to keep" : "optional"}
+            />
+          </label>
+          <div className="wide-field serial-help">
+            MQTT payload: <code>{'{"station_id":"dwd-3","temperature_c":26.1,"humidity":23}'}</code>. Start listener on the server with <code>python manage.py run_mqtt_listener</code>.
+          </div>
+          <button className="primary-button" type="submit" disabled={loading}>
+            Save MQTT settings
+          </button>
+        </form>
+      </AdminTableCard>
+
       <AdminTableCard title="Serial terminal" icon={<Terminal size={20} />}>
         <SerialTerminal events={serialLogs} />
       </AdminTableCard>
+
+      <AdminTableCard title="Последние запросы станции" icon={<Activity size={20} />}>
+        <StationRequestsTable requests={stationRequests} />
+      </AdminTableCard>
+    </div>
+  );
+}
+
+function StationRequestsTable({ requests = [] }) {
+  if (!requests.length) {
+    return (
+      <div className="serial-terminal-empty">
+        <Activity size={20} />
+        <span>Пока нет POST-запросов от Arduino. Проверьте `X-Station-Key` и отправьте измерение на `/api/station/readings`.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="admin-table admin-table-station-requests">
+      <div className="admin-row admin-row-head">
+        <span>Время</span><span>Station ID</span><span>Статус</span><span>IP</span><span>Latency</span><span>Payload</span><span>Ошибка</span>
+      </div>
+      {requests.map((request) => (
+        <div className="admin-row" key={request.id}>
+          <span>{formatDate(request.created_at)}</span>
+          <span>{request.station_id}</span>
+          <span><StatusPill value={request.accepted ? "online" : "error"} /></span>
+          <span>{request.request_ip || "—"}</span>
+          <span>{request.request_latency_ms ?? "—"} ms</span>
+          <span><code>{JSON.stringify(request.raw_payload || {})}</code></span>
+          <span>{request.error || "—"}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -2218,6 +2354,7 @@ function statusLabel(value) {
     serial_bridge: "Serial Bridge",
     wifi_esp01: "ESP-01 Wi-Fi",
     ethernet_shield: "Ethernet Shield",
+    mqtt: "MQTT",
     unknown: "неизвестно",
     not_started: "не начато",
     firmware_assigned: "прошивка выбрана",

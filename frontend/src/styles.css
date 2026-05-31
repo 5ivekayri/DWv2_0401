@@ -431,6 +431,17 @@ a {
   grid-template-columns: 0.9fr 0.9fr 0.7fr 1.8fr 0.8fr;
 }
 
+.admin-table-station-requests .admin-row {
+  grid-template-columns: 1fr 0.9fr 0.7fr 0.8fr 0.7fr 1.4fr 1fr;
+}
+
+.admin-table-station-requests code {
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: var(--text);
+}
+
 .admin-row-head {
   font-size: 0.78rem;
   font-weight: 900;

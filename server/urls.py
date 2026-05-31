@@ -32,6 +32,7 @@ from .views import (
     GeocodeView,
     StationHistoryView,
     StationLatestView,
+    StationRequestsView,
     StationReadingIngestView,
     ExtendedWeatherView,
     WeatherHistoryView,
@@ -100,4 +101,6 @@ urlpatterns = [
     path("station/latest/", StationLatestView.as_view(), name="station_latest_slash"),
     path("station/history", StationHistoryView.as_view(), name="station_history"),
     path("station/history/", StationHistoryView.as_view(), name="station_history_slash"),
+    path("station/requests", StationRequestsView.as_view(), name="station_requests"),
+    path("station/requests/", StationRequestsView.as_view(), name="station_requests_slash"),
 ]

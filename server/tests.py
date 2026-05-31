@@ -20,11 +20,13 @@ from server.models import (
     ExtendedWeatherSnapshot,
     IoTConfiguration,
     ProviderHealth,
+    StationRequestLog,
     SystemEvent,
     WeatherStationReading,
     WeatherHourlySnapshot,
 )
 from server.iot.config import get_iot_config
+from server.iot.mqtt_bridge import MqttArduinoListener, parse_mqtt_message
 from server.iot.serial_bridge import SerialArduinoReader, parse_serial_line
 from server.weather.contracts import WeatherPoint
 from server.weather.storage import get_hour_bucket, normalize_coordinate
@@ -36,6 +38,8 @@ LOC_MEM_CACHE = {
         "LOCATION": "test-cache",
     }
 }
+
+STATION_KEY_HEADER = {"HTTP_X_STATION_KEY": "dev-station-key"}
 
 
 @override_settings(CACHES=LOC_MEM_CACHE)
@@ -310,15 +314,76 @@ class WeatherApiTests(TestCase):
             "observed_at": "2026-05-03T00:00:00Z",
         }
 
-        created = self.client.post("/api/station/readings", payload, format="json")
+        created = self.client.post("/api/station/readings", payload, format="json", **STATION_KEY_HEADER)
         latest = self.client.get("/api/station/latest", {"station_id": "arduino-test"})
         history = self.client.get("/api/station/history", {"station_id": "arduino-test", "limit": "10"})
 
         self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.data, {"status": "ok"})
         self.assertEqual(latest.status_code, 200)
         self.assertEqual(history.status_code, 200)
         self.assertEqual(latest.data["source"], WeatherStationReading.SOURCE_WIFI_ESP01)
+        self.assertEqual(latest.data["request_ip"], "127.0.0.1")
+        self.assertIsNotNone(latest.data["request_latency_ms"])
         self.assertEqual(len(history.data["results"]), 1)
+        request_log = StationRequestLog.objects.get(station_id="arduino-test")
+        self.assertTrue(request_log.accepted)
+        self.assertEqual(request_log.status_code, 201)
+
+    def test_station_ingest_rejects_invalid_station_key_and_logs_request(self):
+        response = self.client.post(
+            "/api/station/readings",
+            {"station_id": "arduino-test", "temperature_c": 27.1, "humidity": 20},
+            format="json",
+            HTTP_X_STATION_KEY="wrong-key",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(WeatherStationReading.objects.exists())
+        request_log = StationRequestLog.objects.get(station_id="arduino-test")
+        self.assertFalse(request_log.accepted)
+        self.assertEqual(request_log.status_code, 403)
+        self.assertEqual(request_log.error, "invalid station key")
+
+    def test_station_requests_endpoint_returns_recent_admin_logs(self):
+        self.client.post(
+            "/api/station/readings",
+            {"station_id": "arduino-test", "temperature_c": 27.1, "humidity": 20},
+            format="json",
+            **STATION_KEY_HEADER,
+        )
+        user = get_user_model().objects.create_user(username="station-admin", password="password123", is_staff=True)
+        self.client.force_authenticate(user=user)
+
+        response = self.client.get("/api/station/requests", {"station_id": "arduino-test"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertTrue(response.data["results"][0]["accepted"])
+        self.assertEqual(response.data["results"][0]["raw_payload"]["temperature_c"], 27.1)
+
+    def test_station_ingest_links_device_by_device_code_alias_and_accepts_r4_wifi_source(self):
+        owner = get_user_model().objects.create_user(username="r4-owner", password="password123")
+        device = DWDDevice.objects.create(
+            owner=owner,
+            device_code="dwd-3",
+            station_id="arduino-3",
+            city="Саранск",
+            status=DWDDevice.STATUS_ACTIVE,
+            is_enabled=True,
+        )
+
+        response = self.client.post(
+            "/api/station/readings",
+            {"station_id": "dwd-3", "temperature_c": 26.1, "humidity": 23, "source": "r4_wifi"},
+            format="json",
+            **STATION_KEY_HEADER,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        reading = WeatherStationReading.objects.get(station_id="dwd-3")
+        self.assertEqual(reading.device_id, device.id)
+        self.assertEqual(reading.source, WeatherStationReading.SOURCE_WIFI_ESP01)
 
     def test_serial_bridge_parses_json_and_saves_common_station_reading(self):
         config = get_iot_config()
@@ -359,6 +424,59 @@ class WeatherApiTests(TestCase):
         payload = parse_serial_line('{"temperature":78.8,"humidity":48,"unit":"fahrenheit"}')
 
         self.assertAlmostEqual(payload.temperature_c, 26.0, places=1)
+
+    def test_mqtt_bridge_saves_reading_and_links_dwd_device(self):
+        owner = get_user_model().objects.create_user(username="mqtt-owner", password="password123")
+        device = DWDDevice.objects.create(
+            owner=owner,
+            device_code="dwd-3",
+            station_id="dwd-3",
+            city="Саранск",
+            status=DWDDevice.STATUS_ACTIVE,
+            firmware_type=WeatherStationReading.SOURCE_MQTT,
+        )
+        config = get_iot_config()
+        config.connection_mode = IoTConfiguration.CONNECTION_MQTT
+        config.mqtt_enabled = True
+        config.mqtt_host = "127.0.0.1"
+        config.mqtt_port = 1883
+        config.mqtt_topic = "darkweather/stations/+/readings"
+        config.mqtt_status = IoTConfiguration.MQTT_STATUS_DISCONNECTED
+        config.save()
+
+        reading = MqttArduinoListener(config=config).save_message(
+            "darkweather/stations/dwd-3/readings",
+            '{"temperature_c":26.1,"humidity":23}',
+            remote_ip="192.168.0.25",
+        )
+
+        device.refresh_from_db()
+        config.refresh_from_db()
+        self.assertIsNotNone(reading)
+        self.assertEqual(reading.device_id, device.id)
+        self.assertEqual(reading.station_id, "dwd-3")
+        self.assertEqual(reading.source, WeatherStationReading.SOURCE_MQTT)
+        self.assertEqual(reading.temperature_c, 26.1)
+        self.assertEqual(reading.humidity, 23)
+        self.assertEqual(device.ip_address, "192.168.0.25")
+        self.assertEqual(config.mqtt_status, IoTConfiguration.MQTT_STATUS_CONNECTED)
+
+    def test_mqtt_bridge_requires_valid_payload_without_crashing(self):
+        config = get_iot_config()
+        config.mqtt_enabled = True
+        config.save()
+
+        reading = MqttArduinoListener(config=config).save_message("weather/station", '{"error":"dht_read_failed"}')
+
+        self.assertIsNone(reading)
+        self.assertFalse(WeatherStationReading.objects.exists())
+        self.assertTrue(SystemEvent.objects.filter(event="mqtt_parse_failed").exists())
+
+    def test_mqtt_topic_can_supply_station_id(self):
+        payload = parse_mqtt_message("darkweather/stations/dwd-3/readings", '{"temperature_c":26.1,"humidity":23}')
+
+        self.assertEqual(payload.station_id, "dwd-3")
+        self.assertEqual(payload.temperature_c, 26.1)
 
     def test_serial_bridge_linked_device_saves_fk_and_logs_normalized_temperature(self):
         owner = get_user_model().objects.create_user(username="serial-owner", password="password123")
@@ -693,6 +811,7 @@ class AdminMonitoringApiTests(TestCase):
                 "precipitation_mm": 0.0,
             },
             format="json",
+            **STATION_KEY_HEADER,
         )
 
         self.client.force_authenticate(user=self.admin)
@@ -775,6 +894,34 @@ class AdminMonitoringApiTests(TestCase):
         self.assertEqual(response.data["serial"]["port"], "COM3")
         self.assertEqual(response.data["serial"]["baud_rate"], 9600)
         self.assertEqual(response.data["serial"]["status"], IoTConfiguration.SERIAL_STATUS_CONNECTED)
+
+    def test_iot_config_updates_mqtt_settings(self):
+        self.client.force_authenticate(user=self.admin)
+
+        updated = self.client.patch(
+            "/api/admin/iot/config/",
+            {
+                "connection_mode": "mqtt",
+                "mqtt_enabled": True,
+                "mqtt_host": "127.0.0.1",
+                "mqtt_port": 1883,
+                "mqtt_topic": "darkweather/stations/+/readings",
+                "mqtt_username": "mqtt-user",
+                "mqtt_password": "mqtt-secret",
+            },
+            format="json",
+        )
+        fetched = self.client.get("/api/admin/iot/config/")
+
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.data["connection_mode"], IoTConfiguration.CONNECTION_MQTT)
+        self.assertTrue(updated.data["mqtt"]["enabled"])
+        self.assertEqual(updated.data["mqtt"]["host"], "127.0.0.1")
+        self.assertEqual(updated.data["mqtt"]["port"], 1883)
+        self.assertEqual(updated.data["mqtt"]["topic"], "darkweather/stations/+/readings")
+        self.assertEqual(updated.data["mqtt"]["username"], "mqtt-user")
+        self.assertTrue(updated.data["mqtt"]["has_password"])
+        self.assertEqual(fetched.data["mqtt"]["status"], IoTConfiguration.MQTT_STATUS_DISCONNECTED)
 
 
 @override_settings(CACHES=LOC_MEM_CACHE)

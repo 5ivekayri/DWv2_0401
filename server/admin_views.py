@@ -68,6 +68,12 @@ class AdminIotConfigSerializer(serializers.Serializer):
     baud_rate = serializers.IntegerField(required=False, min_value=1200, max_value=1000000)
     linked_device_id = serializers.IntegerField(required=False, allow_null=True)
     enabled = serializers.BooleanField(required=False)
+    mqtt_enabled = serializers.BooleanField(required=False)
+    mqtt_host = serializers.CharField(required=False, allow_blank=True)
+    mqtt_port = serializers.IntegerField(required=False, min_value=1, max_value=65535)
+    mqtt_topic = serializers.CharField(required=False, allow_blank=True)
+    mqtt_username = serializers.CharField(required=False, allow_blank=True)
+    mqtt_password = serializers.CharField(required=False, allow_blank=True)
 
 
 def documented_responses(success_schema: Any | None = None) -> dict[int, Any]:
@@ -167,9 +173,9 @@ def check_redis() -> str:
         return "error"
 
 
-def check_mqtt() -> str:
-    host = getattr(settings, "MQTT_HOST", "127.0.0.1")
-    port = int(getattr(settings, "MQTT_PORT", 1883))
+def check_mqtt(host: str | None = None, port: int | None = None) -> str:
+    host = host or getattr(settings, "MQTT_HOST", "127.0.0.1")
+    port = int(port or getattr(settings, "MQTT_PORT", 1883))
     try:
         with socket.create_connection((host, port), timeout=1):
             return "ok"
@@ -219,6 +225,7 @@ class AdminDashboardView(APIView):
         station = get_latest_station_status(
             offline_after_seconds=getattr(settings, "IOT_OFFLINE_AFTER_SECONDS", 3600)
         )
+        config = get_iot_config()
 
         return Response(
             {
@@ -226,7 +233,7 @@ class AdminDashboardView(APIView):
                 "components": {
                     "database": check_database(),
                     "redis": check_redis(),
-                    "mqtt": check_mqtt(),
+                    "mqtt": check_mqtt(config.mqtt_host, config.mqtt_port),
                     "ai": check_ai(),
                 },
                 "providers": providers,
@@ -451,9 +458,9 @@ class AdminIotStatusView(APIView):
                 "last_reading": station["last_reading"],
                 "serial": config_payload["serial"],
                 "mqtt": {
+                    **config_payload["mqtt"],
                     "broker": getattr(settings, "MQTT_BROKER_NAME", "mosquitto"),
-                    "status": check_mqtt(),
-                    "topic": getattr(settings, "MQTT_TOPIC", "weather/station"),
+                    "broker_status": check_mqtt(config.mqtt_host, config.mqtt_port),
                 },
                 "dwd_devices": dwd_devices,
             },
@@ -503,9 +510,31 @@ class AdminIotConfigView(APIView):
                 config.serial_status = IoTConfiguration.SERIAL_STATUS_DISABLED
             elif config.serial_status == IoTConfiguration.SERIAL_STATUS_DISABLED:
                 config.serial_status = IoTConfiguration.SERIAL_STATUS_DISCONNECTED
+        if "mqtt_enabled" in data:
+            config.mqtt_enabled = bool(data["mqtt_enabled"])
+            if not config.mqtt_enabled:
+                config.mqtt_status = IoTConfiguration.MQTT_STATUS_DISABLED
+            elif config.mqtt_status == IoTConfiguration.MQTT_STATUS_DISABLED:
+                config.mqtt_status = IoTConfiguration.MQTT_STATUS_DISCONNECTED
+        if "mqtt_host" in data:
+            config.mqtt_host = str(data["mqtt_host"]).strip()
+        if "mqtt_port" in data:
+            config.mqtt_port = int(data["mqtt_port"])
+        if "mqtt_topic" in data:
+            config.mqtt_topic = str(data["mqtt_topic"]).strip()
+        if "mqtt_username" in data:
+            config.mqtt_username = str(data["mqtt_username"]).strip()
+        if "mqtt_password" in data:
+            password = str(data["mqtt_password"])
+            if password:
+                config.mqtt_password = password
 
         if config.connection_mode == IoTConfiguration.CONNECTION_SERIAL_BRIDGE and config.serial_enabled and not config.serial_port:
             return Response({"detail": "serial_port is required when Serial Bridge is enabled"}, status=status.HTTP_400_BAD_REQUEST)
+        if config.mqtt_enabled and not config.mqtt_host:
+            return Response({"detail": "mqtt_host is required when MQTT is enabled"}, status=status.HTTP_400_BAD_REQUEST)
+        if config.mqtt_enabled and not config.mqtt_topic:
+            return Response({"detail": "mqtt_topic is required when MQTT is enabled"}, status=status.HTTP_400_BAD_REQUEST)
 
         if (
             config.connection_mode == IoTConfiguration.CONNECTION_SERIAL_BRIDGE
@@ -528,6 +557,10 @@ class AdminIotConfigView(APIView):
                 "serial_port": config.serial_port,
                 "baud_rate": config.baud_rate,
                 "linked_device_id": config.linked_device_id,
+                "mqtt_enabled": config.mqtt_enabled,
+                "mqtt_host": config.mqtt_host,
+                "mqtt_port": config.mqtt_port,
+                "mqtt_topic": config.mqtt_topic,
                 "user_id": request.user.pk,
             },
         )

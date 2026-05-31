@@ -301,3 +301,8 @@ export function updateAdminIotConfig(payload, tokens) {
 export function getAdminIotStatus(tokens) {
   return apiRequest("/admin/iot/status/", {}, tokens);
 }
+
+export function listStationRequests(tokens, params = {}) {
+  const query = new URLSearchParams(params).toString();
+  return apiRequest(`/station/requests/${query ? `?${query}` : ""}`, {}, tokens);
+}

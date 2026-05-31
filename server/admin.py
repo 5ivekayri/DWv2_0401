@@ -7,6 +7,7 @@ from .models import (
     DWDProvisioning,
     ExtendedWeatherSnapshot,
     IoTConfiguration,
+    StationRequestLog,
     WeatherStationReading,
 )
 
@@ -62,13 +63,46 @@ class ExtendedWeatherSnapshotAdmin(admin.ModelAdmin):
 
 @admin.register(WeatherStationReading)
 class WeatherStationReadingAdmin(admin.ModelAdmin):
-    list_display = ("id", "device", "station_id", "source", "temperature_c", "humidity", "observed_at", "created_at")
+    list_display = (
+        "id",
+        "device",
+        "station_id",
+        "source",
+        "temperature_c",
+        "humidity",
+        "request_ip",
+        "request_latency_ms",
+        "observed_at",
+        "created_at",
+    )
     list_filter = ("source", "device", "station_id", "observed_at")
-    search_fields = ("station_id", "source", "device__device_code", "device__city")
+    search_fields = ("station_id", "source", "request_ip", "device__device_code", "device__city")
+    readonly_fields = ("created_at",)
+
+
+@admin.register(StationRequestLog)
+class StationRequestLogAdmin(admin.ModelAdmin):
+    list_display = ("id", "station_id", "accepted", "status_code", "request_ip", "request_latency_ms", "reading", "created_at")
+    list_filter = ("accepted", "status_code", "station_id", "created_at")
+    search_fields = ("station_id", "request_ip", "error")
     readonly_fields = ("created_at",)
 
 
 @admin.register(IoTConfiguration)
 class IoTConfigurationAdmin(admin.ModelAdmin):
-    list_display = ("id", "connection_mode", "linked_device", "serial_enabled", "serial_port", "baud_rate", "serial_status", "updated_at")
-    readonly_fields = ("created_at", "updated_at", "serial_last_seen_at")
+    list_display = (
+        "id",
+        "connection_mode",
+        "linked_device",
+        "serial_enabled",
+        "serial_port",
+        "baud_rate",
+        "serial_status",
+        "mqtt_enabled",
+        "mqtt_host",
+        "mqtt_port",
+        "mqtt_topic",
+        "mqtt_status",
+        "updated_at",
+    )
+    readonly_fields = ("created_at", "updated_at", "serial_last_seen_at", "mqtt_last_seen_at")

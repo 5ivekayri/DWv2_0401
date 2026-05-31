@@ -39,7 +39,10 @@ def device_station_payload(device: DWDDevice, *, status: str | None = None) -> d
 def find_device_by_station_id(station_id: str) -> DWDDevice | None:
     if not station_id:
         return None
-    return DWDDevice.objects.select_related("owner").filter(station_id=station_id).first()
+    device = DWDDevice.objects.select_related("owner").filter(station_id=station_id).first()
+    if device is not None:
+        return device
+    return DWDDevice.objects.select_related("owner").filter(device_code=station_id).first()
 
 
 def record_device_reading(reading: WeatherStationReading, *, ip_address: str | None = None) -> None:

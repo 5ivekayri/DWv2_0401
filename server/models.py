@@ -109,11 +109,13 @@ class WeatherStationReading(models.Model):
     SOURCE_SERIAL_BRIDGE = "serial_bridge"
     SOURCE_WIFI_ESP01 = "wifi_esp01"
     SOURCE_ETHERNET_SHIELD = "ethernet_shield"
+    SOURCE_MQTT = "mqtt"
 
     SOURCE_CHOICES = [
         (SOURCE_SERIAL_BRIDGE, "Serial Bridge"),
         (SOURCE_WIFI_ESP01, "ESP-01 Wi-Fi"),
         (SOURCE_ETHERNET_SHIELD, "Ethernet Shield"),
+        (SOURCE_MQTT, "MQTT"),
     ]
 
     device = models.ForeignKey(
@@ -135,6 +137,8 @@ class WeatherStationReading(models.Model):
 
     observed_at = models.DateTimeField(db_index=True)
     source = models.CharField(max_length=32, choices=SOURCE_CHOICES, default=SOURCE_WIFI_ESP01, db_index=True)
+    request_ip = models.CharField(max_length=64, blank=True, default="")
+    request_latency_ms = models.FloatField(null=True, blank=True)
     raw_payload = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -150,15 +154,45 @@ class WeatherStationReading(models.Model):
         return f"{self.station_id} @ {self.observed_at.isoformat()}"
 
 
+class StationRequestLog(models.Model):
+    station_id = models.CharField(max_length=64, db_index=True, default="arduino-1")
+    reading = models.ForeignKey(
+        WeatherStationReading,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="request_logs",
+    )
+    request_ip = models.CharField(max_length=64, blank=True, default="")
+    request_latency_ms = models.FloatField(null=True, blank=True)
+    status_code = models.PositiveSmallIntegerField()
+    accepted = models.BooleanField(default=False, db_index=True)
+    error = models.TextField(blank=True, default="")
+    raw_payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["station_id", "created_at"]),
+            models.Index(fields=["accepted", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.station_id} {self.status_code} @ {self.created_at.isoformat()}"
+
+
 class IoTConfiguration(models.Model):
     CONNECTION_SERIAL_BRIDGE = "serial_bridge"
     CONNECTION_WIFI_ESP01 = "wifi_esp01"
     CONNECTION_ETHERNET_SHIELD = "ethernet_shield"
+    CONNECTION_MQTT = "mqtt"
 
     CONNECTION_MODE_CHOICES = [
         (CONNECTION_SERIAL_BRIDGE, "Serial Bridge"),
         (CONNECTION_WIFI_ESP01, "ESP-01 Wi-Fi"),
         (CONNECTION_ETHERNET_SHIELD, "Ethernet Shield"),
+        (CONNECTION_MQTT, "MQTT"),
     ]
 
     SERIAL_STATUS_DISABLED = "disabled"
@@ -171,6 +205,18 @@ class IoTConfiguration(models.Model):
         (SERIAL_STATUS_DISCONNECTED, "Disconnected"),
         (SERIAL_STATUS_CONNECTED, "Connected"),
         (SERIAL_STATUS_ERROR, "Error"),
+    ]
+
+    MQTT_STATUS_DISABLED = "disabled"
+    MQTT_STATUS_DISCONNECTED = "disconnected"
+    MQTT_STATUS_CONNECTED = "connected"
+    MQTT_STATUS_ERROR = "error"
+
+    MQTT_STATUS_CHOICES = [
+        (MQTT_STATUS_DISABLED, "Disabled"),
+        (MQTT_STATUS_DISCONNECTED, "Disconnected"),
+        (MQTT_STATUS_CONNECTED, "Connected"),
+        (MQTT_STATUS_ERROR, "Error"),
     ]
 
     connection_mode = models.CharField(
@@ -195,6 +241,19 @@ class IoTConfiguration(models.Model):
     )
     serial_last_error = models.TextField(blank=True, default="")
     serial_last_seen_at = models.DateTimeField(null=True, blank=True)
+    mqtt_enabled = models.BooleanField(default=False)
+    mqtt_host = models.CharField(max_length=255, blank=True, default="127.0.0.1")
+    mqtt_port = models.PositiveIntegerField(default=1883)
+    mqtt_topic = models.CharField(max_length=255, blank=True, default="weather/station")
+    mqtt_username = models.CharField(max_length=128, blank=True, default="")
+    mqtt_password = models.CharField(max_length=255, blank=True, default="")
+    mqtt_status = models.CharField(
+        max_length=32,
+        choices=MQTT_STATUS_CHOICES,
+        default=MQTT_STATUS_DISABLED,
+    )
+    mqtt_last_error = models.TextField(blank=True, default="")
+    mqtt_last_seen_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -203,7 +262,7 @@ class IoTConfiguration(models.Model):
         verbose_name_plural = "IoT configuration"
 
     def __str__(self) -> str:
-        return f"{self.connection_mode} serial={self.serial_status}"
+        return f"{self.connection_mode} serial={self.serial_status} mqtt={self.mqtt_status}"
 
 
 class ProviderHealth(models.Model):

@@ -28,7 +28,7 @@ from server.monitoring import (
     record_race_run,
     record_system_event,
 )
-from server.models import DWDDevice, WeatherHourlySnapshot, WeatherStationReading
+from server.models import DWDDevice, StationRequestLog, WeatherHourlySnapshot, WeatherStationReading
 from .weather.contracts import WeatherPoint
 from .weather.factory import build_weather_service
 from .weather.geocoding import geocode_city
@@ -79,7 +79,7 @@ STATION_READING_REQUEST_SCHEMA = inline_serializer(
         "latitude": serializers.FloatField(required=False),
         "longitude": serializers.FloatField(required=False),
         "temperature_c": serializers.FloatField(),
-        "humidity": serializers.FloatField(required=False),
+        "humidity": serializers.FloatField(),
         "pressure_hpa": serializers.FloatField(required=False),
         "wind_speed_ms": serializers.FloatField(required=False),
         "precipitation_mm": serializers.FloatField(required=False),
@@ -773,38 +773,97 @@ class StationReadingIngestView(APIView):
 
     @extend_schema(
         request=STATION_READING_REQUEST_SCHEMA,
-        responses={201: OpenApiResponse(description="Created station reading")},
+        responses={201: inline_serializer(name="StationReadingIngestResponse", fields={"status": serializers.CharField()})},
     )
     def post(self, request):
+        started_at = time.perf_counter()
+        request_ip = _request_ip(request)
+        request_payload = _safe_request_payload(request)
+        request_station_id = _station_id_from_payload(request_payload)
         configured_key = getattr(settings, "STATION_API_KEY", "")
         if configured_key and request.headers.get("X-Station-Key") != configured_key:
-            api_log.warning("station_ingest_rejected reason=invalid_key")
+            latency_ms = _request_latency_ms(started_at)
+            StationRequestLog.objects.create(
+                station_id=request_station_id,
+                request_ip=request_ip,
+                request_latency_ms=latency_ms,
+                status_code=status.HTTP_403_FORBIDDEN,
+                accepted=False,
+                error="invalid station key",
+                raw_payload=request_payload,
+            )
+            record_system_event(
+                event="station_request_rejected",
+                source="iot",
+                level="WARNING",
+                message=f"Station request rejected for {request_station_id}",
+                payload={
+                    "station_id": request_station_id,
+                    "reason": "invalid_key",
+                    "request_ip": request_ip,
+                    "request_latency_ms": latency_ms,
+                },
+            )
+            api_log.warning(
+                "station_ingest_rejected reason=invalid_key station_id=%s ip=%s latency_ms=%s",
+                request_station_id,
+                request_ip,
+                latency_ms,
+            )
             return Response({"detail": "invalid station key"}, status=status.HTTP_403_FORBIDDEN)
 
         try:
-            station_id = str(request.data.get("station_id", "arduino-1")).strip() or "arduino-1"
-            temperature_c = float(request.data["temperature_c"])
-            humidity = self._optional_float(request.data.get("humidity"))
-            pressure_hpa = self._optional_float(request.data.get("pressure_hpa"))
-            wind_speed_ms = float(request.data.get("wind_speed_ms", 0.0))
-            precipitation_mm = float(request.data.get("precipitation_mm", 0.0))
-            latitude = self._optional_float(request.data.get("latitude"))
-            longitude = self._optional_float(request.data.get("longitude"))
-            observed_at = self._parse_observed_at(request.data.get("observed_at"))
-            reading_source = str(request.data.get("source", WeatherStationReading.SOURCE_WIFI_ESP01)).strip()
+            station_id = str(request_payload.get("station_id", "arduino-1")).strip() or "arduino-1"
+            temperature_c = float(request_payload["temperature_c"])
+            humidity = float(request_payload["humidity"])
+            pressure_hpa = self._optional_float(request_payload.get("pressure_hpa"))
+            wind_speed_ms = float(request_payload.get("wind_speed_ms", 0.0))
+            precipitation_mm = float(request_payload.get("precipitation_mm", 0.0))
+            latitude = self._optional_float(request_payload.get("latitude"))
+            longitude = self._optional_float(request_payload.get("longitude"))
+            observed_at = self._parse_observed_at(request_payload.get("observed_at"))
+            reading_source = _normalize_station_source(request_payload.get("source"))
             if reading_source not in dict(WeatherStationReading.SOURCE_CHOICES):
                 raise ValueError("invalid source")
         except KeyError as exc:
+            latency_ms = _request_latency_ms(started_at)
+            StationRequestLog.objects.create(
+                station_id=request_station_id,
+                request_ip=request_ip,
+                request_latency_ms=latency_ms,
+                status_code=status.HTTP_400_BAD_REQUEST,
+                accepted=False,
+                error=f"missing required field: {exc.args[0]}",
+                raw_payload=request_payload,
+            )
             return Response(
                 {"detail": f"missing required field: {exc.args[0]}"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            latency_ms = _request_latency_ms(started_at)
+            StationRequestLog.objects.create(
+                station_id=request_station_id,
+                request_ip=request_ip,
+                request_latency_ms=latency_ms,
+                status_code=status.HTTP_400_BAD_REQUEST,
+                accepted=False,
+                error="invalid station payload",
+                raw_payload=request_payload,
+            )
+            api_log.warning(
+                "station_ingest_rejected reason=invalid_payload station_id=%s ip=%s latency_ms=%s error=%s",
+                request_station_id,
+                request_ip,
+                latency_ms,
+                exc,
+            )
             return Response(
                 {"detail": "invalid station payload"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        latency_ms = _request_latency_ms(started_at)
         reading = WeatherStationReading.objects.create(
             device=find_device_by_station_id(station_id),
             station_id=station_id,
@@ -817,10 +876,21 @@ class StationReadingIngestView(APIView):
             precipitation_mm=precipitation_mm,
             observed_at=observed_at,
             source=reading_source,
-            raw_payload=dict(request.data),
+            request_ip=request_ip,
+            request_latency_ms=latency_ms,
+            raw_payload=request_payload,
         )
-        record_device_reading(reading, ip_address=_request_ip(request))
+        record_device_reading(reading, ip_address=request_ip)
         store_station_reading_snapshot(reading)
+        StationRequestLog.objects.create(
+            station_id=reading.station_id,
+            reading=reading,
+            request_ip=request_ip,
+            request_latency_ms=latency_ms,
+            status_code=status.HTTP_201_CREATED,
+            accepted=True,
+            raw_payload=request_payload,
+        )
 
         record_system_event(
             event="iot_reading_received",
@@ -831,10 +901,20 @@ class StationReadingIngestView(APIView):
                 "temperature_c": reading.temperature_c,
                 "humidity": reading.humidity,
                 "source": reading.source,
+                "request_ip": request_ip,
+                "request_latency_ms": latency_ms,
             },
         )
-        api_log.info("station_ingest_succeeded station_id=%s reading_id=%s", reading.station_id, reading.pk)
-        return Response(station_reading_to_payload(reading), status=status.HTTP_201_CREATED)
+        api_log.info(
+            "station_ingest_succeeded station_id=%s reading_id=%s ip=%s latency_ms=%s temperature_c=%s humidity=%s",
+            reading.station_id,
+            reading.pk,
+            request_ip,
+            latency_ms,
+            reading.temperature_c,
+            reading.humidity,
+        )
+        return Response({"status": "ok"}, status=status.HTTP_201_CREATED)
 
     @staticmethod
     def _optional_float(value):
@@ -859,6 +939,48 @@ def _request_ip(request) -> str:
     if forwarded_for:
         return forwarded_for.split(",", 1)[0].strip()
     return request.META.get("REMOTE_ADDR", "") or ""
+
+
+def _safe_request_payload(request) -> dict:
+    data = request.data
+    if hasattr(data, "dict"):
+        data = data.dict()
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): value for key, value in data.items()}
+
+
+def _station_id_from_payload(payload: dict) -> str:
+    return str(payload.get("station_id") or "arduino-1").strip() or "arduino-1"
+
+
+def _normalize_station_source(value) -> str:
+    source = str(value or WeatherStationReading.SOURCE_WIFI_ESP01).strip()
+    aliases = {
+        "r4_wifi": WeatherStationReading.SOURCE_WIFI_ESP01,
+        "arduino_r4_wifi": WeatherStationReading.SOURCE_WIFI_ESP01,
+        "wifi": WeatherStationReading.SOURCE_WIFI_ESP01,
+    }
+    return aliases.get(source, source)
+
+
+def _request_latency_ms(started_at: float) -> float:
+    return round((time.perf_counter() - started_at) * 1000, 2)
+
+
+def _station_request_to_payload(obj: StationRequestLog) -> dict:
+    return {
+        "id": obj.id,
+        "station_id": obj.station_id,
+        "reading_id": obj.reading_id,
+        "request_ip": obj.request_ip,
+        "request_latency_ms": obj.request_latency_ms,
+        "status_code": obj.status_code,
+        "accepted": obj.accepted,
+        "error": obj.error,
+        "raw_payload": obj.raw_payload,
+        "created_at": obj.created_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
 
 
 def _normalize_city_query(city: str) -> str:
@@ -917,6 +1039,9 @@ def _city_latest_payload(city: str) -> dict:
             "temperature_c": reading.temperature_c,
             "humidity": reading.humidity,
             "source": reading.source,
+            "request_ip": reading.request_ip,
+            "last_ip": reading.request_ip,
+            "request_latency_ms": reading.request_latency_ms,
             "created_at": reading.created_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
             "observed_at": reading_payload["observed_at"],
         },
@@ -1030,3 +1155,41 @@ class StationHistoryView(APIView):
             {"results": data},
             status=status.HTTP_200_OK,
         )
+
+
+class StationRequestsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter("station_id", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False),
+            OpenApiParameter("limit", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False),
+        ],
+        responses={200: OpenApiResponse(description="Recent station ingest requests")},
+    )
+    def get(self, request):
+        if not request.user.is_staff and not request.user.is_superuser:
+            return Response({"detail": "admin access required"}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            limit = min(max(int(request.query_params.get("limit", 50)), 1), 500)
+        except ValueError:
+            return Response(
+                {"detail": "limit must be an integer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        station_id = str(request.query_params.get("station_id", "")).strip()
+        requests = StationRequestLog.objects.select_related("reading").all()
+        if station_id:
+            requests = requests.filter(station_id=station_id)
+
+        data = [_station_request_to_payload(obj) for obj in requests.order_by("-created_at", "-id")[:limit]]
+        api_log.info(
+            "station_requests_succeeded user_id=%s station_id=%s limit=%s results=%s",
+            request.user.pk,
+            station_id or "*",
+            limit,
+            len(data),
+        )
+        return Response({"results": data}, status=status.HTTP_200_OK)

@@ -159,6 +159,9 @@ def station_reading_to_payload(reading: WeatherStationReading) -> dict:
         "observed_at": reading.observed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         "created_at": reading.created_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         "source": reading.source,
+        "request_ip": reading.request_ip,
+        "last_ip": reading.request_ip,
+        "request_latency_ms": reading.request_latency_ms,
         "data_source": WeatherHourlySnapshot.SOURCE_IOT_MQTT,
     }
 

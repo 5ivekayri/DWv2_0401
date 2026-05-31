@@ -28,7 +28,11 @@ SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-dev-only-change-me"
 DEBUG = True
 TESTING_MODE = os.getenv("TESTING_MODE", "0") == "1"
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.getenv("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost,0.0.0.0,192.168.0.11").split(",")
+    if host.strip()
+]
 
 
 # Application definition
@@ -152,11 +156,14 @@ WEATHER_RACE_TIMEOUT_SECONDS = float(os.getenv("WEATHER_RACE_TIMEOUT_SECONDS", "
 VISUAL_CROSSING_API_KEY = os.getenv("VISUAL_CROSSING_API_KEY", "").strip()
 VISUAL_CROSSING_TIMEOUT_SECONDS = float(os.getenv("VISUAL_CROSSING_TIMEOUT_SECONDS", "10"))
 VISUAL_CROSSING_RACE_ENABLED = os.getenv("VISUAL_CROSSING_RACE_ENABLED", "0") == "1"
-STATION_API_KEY = os.getenv("STATION_API_KEY", "").strip()
+STATION_API_KEY = os.getenv("STATION_API_KEY", "dev-station-key").strip()
 MQTT_HOST = os.getenv("MQTT_HOST", "127.0.0.1").strip()
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_TOPIC = os.getenv("MQTT_TOPIC", "weather/station").strip()
 MQTT_BROKER_NAME = os.getenv("MQTT_BROKER_NAME", "mosquitto").strip()
+MQTT_ENABLED = os.getenv("MQTT_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+MQTT_USERNAME = os.getenv("MQTT_USERNAME", "").strip()
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
 IOT_STATION_NAME = os.getenv("IOT_STATION_NAME", "Arduino Uno Weather Station").strip()
 IOT_FIXED_CITY = os.getenv("IOT_FIXED_CITY", "Saransk").strip()
 IOT_OFFLINE_AFTER_SECONDS = int(os.getenv("IOT_OFFLINE_AFTER_SECONDS", "3600"))
