@@ -272,6 +272,26 @@ export function getProviderDashboard(tokens) {
   return apiRequest("/provider-dashboard/", {}, tokens);
 }
 
+export function listDwdNotifications(tokens, params = {}) {
+  const query = new URLSearchParams(params).toString();
+  return apiRequest(`/dwd/notifications/${query ? `?${query}` : ""}`, {}, tokens);
+}
+
+export function markDwdNotificationRead(id, tokens) {
+  return apiRequest(`/dwd/notifications/${id}/read/`, { method: "POST" }, tokens);
+}
+
+export function listDwdApplicationMessages(applicationId, tokens) {
+  return apiRequest(`/provider-applications/${applicationId}/messages/`, {}, tokens);
+}
+
+export function sendDwdApplicationMessage(applicationId, message, tokens) {
+  return apiRequest(`/provider-applications/${applicationId}/messages/`, {
+    method: "POST",
+    body: JSON.stringify({ message }),
+  }, tokens);
+}
+
 export function listAdminDwdProvisioning(tokens) {
   return apiRequest("/admin/dwd/provisioning/", {}, tokens);
 }

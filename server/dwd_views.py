@@ -17,11 +17,20 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from drf_spectacular.utils import OpenApiResponse, OpenApiTypes, extend_schema, extend_schema_field, inline_serializer
 
-from server.models import DWDDevice, DWDDeviceEvent, DWDProviderApplication, DWDProvisioning, SystemEvent
+from server.models import (
+    DWDDevice,
+    DWDDeviceEvent,
+    DWDNotification,
+    DWDProviderApplication,
+    DWDProvisioning,
+    DWDSupportMessage,
+    SystemEvent,
+)
 from server.monitoring import record_system_event, utc_iso
 
 
 PROVIDER_GROUP_NAME = "provider"
+MQTT_TOPIC_PREFIX = "darkweather/stations"
 
 FIRMWARE_INSTRUCTION_TEMPLATES = {
     DWDProvisioning.FIRMWARE_SERIAL_BRIDGE: (
@@ -146,6 +155,366 @@ def record_device_event(
     )
 
 
+def notify_user(
+    recipient,
+    *,
+    notification_type: str,
+    title: str,
+    message: str = "",
+    application: DWDProviderApplication | None = None,
+    device: DWDDevice | None = None,
+    provisioning: DWDProvisioning | None = None,
+) -> DWDNotification | None:
+    if recipient is None:
+        return None
+    return DWDNotification.objects.create(
+        recipient=recipient,
+        notification_type=notification_type,
+        title=title,
+        message=message,
+        application=application,
+        device=device,
+        provisioning=provisioning,
+    )
+
+
+def notify_admins(
+    *,
+    notification_type: str,
+    title: str,
+    message: str = "",
+    application: DWDProviderApplication | None = None,
+    device: DWDDevice | None = None,
+    provisioning: DWDProvisioning | None = None,
+    exclude_user_id: int | None = None,
+) -> None:
+    User = get_user_model()
+    admins = User.objects.filter(is_staff=True)
+    if exclude_user_id:
+        admins = admins.exclude(pk=exclude_user_id)
+    for admin_user in admins.distinct():
+        notify_user(
+            admin_user,
+            notification_type=notification_type,
+            title=title,
+            message=message,
+            application=application,
+            device=device,
+            provisioning=provisioning,
+        )
+
+
+def c_string(value: str) -> str:
+    return str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "")
+
+
+def mqtt_public_host(request=None) -> str:
+    configured = str(getattr(settings, "DWD_MQTT_PUBLIC_HOST", "") or "").strip()
+    if configured:
+        return configured
+    if request is not None:
+        host = request.get_host().split(":")[0]
+        if host and host not in {"testserver", "localhost", "127.0.0.1", "0.0.0.0"}:
+            return host
+    return str(getattr(settings, "MQTT_HOST", "127.0.0.1") or "127.0.0.1").strip()
+
+
+def generate_mqtt_wifi_firmware(
+    *,
+    device: DWDDevice | None,
+    firmware_version: str,
+    wifi_ssid: str = "",
+    wifi_password: str = "",
+    request=None,
+) -> str:
+    station_id = device.station_id if device else "PUT_STATION_ID_HERE"
+    mqtt_topic = f"{MQTT_TOPIC_PREFIX}/{station_id}/readings"
+    mqtt_username = str(getattr(settings, "MQTT_USERNAME", "") or "")
+    mqtt_password = str(getattr(settings, "MQTT_PASSWORD", "") or "")
+    mqtt_host = mqtt_public_host(request)
+    mqtt_port = int(getattr(settings, "MQTT_PORT", 1883) or 1883)
+    ssid_value = wifi_ssid or "PUT_WIFI_SSID_HERE"
+    password_value = wifi_password or "PUT_WIFI_PASSWORD_HERE"
+
+    return f"""// Dark Weather MQTT WiFi firmware
+// Firmware version: {c_string(firmware_version or "1.0.0")}
+// Station ID: {c_string(station_id)}
+// Wi-Fi fields are optional in the admin panel. If placeholders are present, fill them before upload.
+
+#include <WiFiS3.h>
+#include <ArduinoMqttClient.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
+
+#define DHTPIN 2
+#define DHTTYPE DHT11
+
+#define READ_INTERVAL_MS 2000UL
+#define SEND_INTERVAL_MS 10000UL
+#define SCREEN_INTERVAL_MS 5000UL
+
+const char* WIFI_SSID = "{c_string(ssid_value)}";
+const char* WIFI_PASSWORD = "{c_string(password_value)}";
+
+const char* MQTT_HOST = "{c_string(mqtt_host)}";
+const int MQTT_PORT = {mqtt_port};
+
+const char* STATION_ID = "{c_string(station_id)}";
+const char* MQTT_TOPIC = "{c_string(mqtt_topic)}";
+
+const char* MQTT_USERNAME = "{c_string(mqtt_username)}";
+const char* MQTT_PASSWORD = "{c_string(mqtt_password)}";
+
+DHT dht(DHTPIN, DHTTYPE);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+WiFiClient wifiClient;
+MqttClient mqttClient(wifiClient);
+
+float lastTemperature = NAN;
+float lastHumidity = NAN;
+
+unsigned long lastReadMs = 0;
+unsigned long lastSendMs = 0;
+unsigned long lastScreenMs = 0;
+
+bool showInfoScreen = false;
+
+char lastStatus[17] = "Booting";
+int lastMqttCode = 0;
+
+void setup() {{
+  Serial.begin(9600);
+  delay(1500);
+
+  dht.begin();
+
+  lcd.init();
+  lcd.backlight();
+
+  lcd.setCursor(0, 0);
+  lcd.print("DWD R4 MQTT");
+  lcd.setCursor(0, 1);
+  lcd.print("Starting...");
+  delay(1500);
+  lcd.clear();
+
+  connectWiFi();
+  connectMqtt();
+}}
+
+void loop() {{
+  unsigned long now = millis();
+
+  if (WiFi.status() != WL_CONNECTED) {{
+    setStatus("WiFi lost");
+    connectWiFi();
+  }}
+
+  if (!mqttClient.connected()) {{
+    setStatus("MQTT lost");
+    connectMqtt();
+  }}
+
+  mqttClient.poll();
+
+  if (now - lastReadMs >= READ_INTERVAL_MS) {{
+    lastReadMs = now;
+    readSensor();
+  }}
+
+  if (now - lastScreenMs >= SCREEN_INTERVAL_MS) {{
+    lastScreenMs = now;
+    showInfoScreen = !showInfoScreen;
+    updateLCD();
+  }}
+
+  if (!isnan(lastTemperature) && !isnan(lastHumidity)) {{
+    if (lastSendMs == 0 || now - lastSendMs >= SEND_INTERVAL_MS) {{
+      lastSendMs = now;
+      publishReading(lastTemperature, (int)lastHumidity);
+      updateLCD();
+    }}
+  }}
+}}
+
+void connectWiFi() {{
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("WiFi connect");
+  lcd.setCursor(0, 1);
+  lcd.print(WIFI_SSID);
+
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(WIFI_SSID);
+
+  while (WiFi.begin(WIFI_SSID, WIFI_PASSWORD) != WL_CONNECTED) {{
+    Serial.print(".");
+    setStatus("WiFi wait");
+    delay(2000);
+  }}
+
+  Serial.println();
+  Serial.println("WiFi connected");
+  Serial.print("Arduino IP: ");
+  Serial.println(WiFi.localIP());
+
+  setStatus("WiFi OK");
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("WiFi OK");
+  lcd.setCursor(0, 1);
+  lcd.print(WiFi.localIP());
+  delay(2000);
+}}
+
+void connectMqtt() {{
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("MQTT connect");
+  lcd.setCursor(0, 1);
+  lcd.print(MQTT_HOST);
+
+  Serial.print("Connecting to MQTT: ");
+  Serial.print(MQTT_HOST);
+  Serial.print(":");
+  Serial.println(MQTT_PORT);
+
+  if (strlen(MQTT_USERNAME) > 0) {{
+    mqttClient.setUsernamePassword(MQTT_USERNAME, MQTT_PASSWORD);
+  }}
+
+  while (!mqttClient.connect(MQTT_HOST, MQTT_PORT)) {{
+    Serial.print("MQTT failed, error code: ");
+    Serial.println(mqttClient.connectError());
+
+    setStatus("MQTT wait");
+    lastMqttCode = mqttClient.connectError();
+    updateLCD();
+
+    delay(3000);
+  }}
+
+  Serial.println("MQTT connected");
+  setStatus("MQTT OK");
+  lastMqttCode = 0;
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("MQTT OK");
+  lcd.setCursor(0, 1);
+  lcd.print(MQTT_TOPIC);
+  delay(1500);
+}}
+
+void readSensor() {{
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+
+  if (isnan(humidity) || isnan(temperature)) {{
+    setStatus("DHT error");
+    Serial.println("{{\\"error\\":\\"dht_read_failed\\"}}");
+    updateLCD();
+    return;
+  }}
+
+  lastTemperature = temperature;
+  lastHumidity = humidity;
+
+  Serial.print("{{\\"temperature_c\\":");
+  Serial.print(temperature, 1);
+  Serial.print(",\\"humidity\\":");
+  Serial.print(humidity, 0);
+  Serial.println(",\\"source\\":\\"mqtt\\"}}");
+}}
+
+void publishReading(float temperatureC, int humidity) {{
+  char body[160];
+
+  snprintf(
+    body,
+    sizeof(body),
+    "{{\\"station_id\\":\\"%s\\",\\"temperature_c\\":%.1f,\\"humidity\\":%d}}",
+    STATION_ID,
+    temperatureC,
+    humidity
+  );
+
+  Serial.println("Publishing MQTT:");
+  Serial.println(MQTT_TOPIC);
+  Serial.println(body);
+
+  if (!mqttClient.connected()) {{
+    connectMqtt();
+  }}
+
+  setStatus("Publishing");
+  updateLCD();
+
+  mqttClient.beginMessage(MQTT_TOPIC);
+  mqttClient.print(body);
+  int result = mqttClient.endMessage();
+
+  if (result == 1) {{
+    setStatus("MQTT sent");
+    lastMqttCode = 0;
+  }} else {{
+    setStatus("MQTT error");
+    lastMqttCode = result;
+  }}
+
+  Serial.print("MQTT publish result: ");
+  Serial.println(result);
+}}
+
+void updateLCD() {{
+  lcd.clear();
+
+  if (!showInfoScreen) {{
+    if (isnan(lastTemperature) || isnan(lastHumidity)) {{
+      lcd.setCursor(0, 0);
+      lcd.print("Sensor wait");
+      lcd.setCursor(0, 1);
+      lcd.print(lastStatus);
+      return;
+    }}
+
+    lcd.setCursor(0, 0);
+    lcd.print("Temp: ");
+    lcd.print(lastTemperature, 1);
+    lcd.print((char)223);
+    lcd.print("C");
+
+    lcd.setCursor(0, 1);
+    lcd.print("Hum:  ");
+    lcd.print(lastHumidity, 0);
+    lcd.print("%");
+  }} else {{
+    lcd.setCursor(0, 0);
+    lcd.print("IP:");
+    lcd.print(WiFi.localIP());
+
+    lcd.setCursor(0, 1);
+
+    if (lastMqttCode != 0) {{
+      lcd.print("MQ:");
+      lcd.print(lastMqttCode);
+      lcd.print(" ");
+    }}
+
+    lcd.print(lastStatus);
+  }}
+}}
+
+void setStatus(const char* status) {{
+  strncpy(lastStatus, status, sizeof(lastStatus));
+  lastStatus[sizeof(lastStatus) - 1] = '\\0';
+}}
+"""
+
+
 class DWDUserAdminSerializer(serializers.ModelSerializer):
     role = serializers.SerializerMethodField()
     active_application = serializers.SerializerMethodField()
@@ -183,6 +552,7 @@ class DWDDeviceSerializer(serializers.ModelSerializer):
     online_status = serializers.SerializerMethodField()
     provisioning_status = serializers.SerializerMethodField()
     instruction_text = serializers.SerializerMethodField()
+    firmware_code = serializers.SerializerMethodField()
     instruction_sent = serializers.SerializerMethodField()
     instruction_sent_at = serializers.SerializerMethodField()
     instruction_sent_by = serializers.SerializerMethodField()
@@ -216,6 +586,7 @@ class DWDDeviceSerializer(serializers.ModelSerializer):
             "last_error_at",
             "provisioning_status",
             "instruction_text",
+            "firmware_code",
             "instruction_sent",
             "instruction_sent_at",
             "instruction_sent_by",
@@ -243,6 +614,11 @@ class DWDDeviceSerializer(serializers.ModelSerializer):
     def get_instruction_text(self, obj):
         provisioning = self._latest_provisioning(obj)
         return provisioning.instruction_text if provisioning else ""
+
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_firmware_code(self, obj):
+        provisioning = self._latest_provisioning(obj)
+        return provisioning.firmware_code if provisioning else ""
 
     @extend_schema_field(OpenApiTypes.BOOL)
     def get_instruction_sent(self, obj):
@@ -318,6 +694,12 @@ class DWDProviderApplicationCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         user = self.context["request"].user
         application = DWDProviderApplication.objects.create(user=user, **validated_data)
+        notify_admins(
+            notification_type=DWDNotification.TYPE_APPLICATION_SUBMITTED,
+            title="Новая заявка DWD",
+            message=f"{user.get_username()} хочет подключить устройство в городе {application.city}.",
+            application=application,
+        )
         record_system_event(
             event="dwd_provider_application_created",
             source="dwd",
@@ -402,6 +784,8 @@ class DWDProvisioningCreateSerializer(serializers.Serializer):
     firmware_type = serializers.ChoiceField(choices=[choice[0] for choice in DWDProvisioning.FIRMWARE_CHOICES])
     firmware_version = serializers.CharField(max_length=64, required=False, allow_blank=True)
     instruction_text = serializers.CharField(required=False, allow_blank=True, trim_whitespace=False)
+    wifi_ssid = serializers.CharField(max_length=128, required=False, allow_blank=True, trim_whitespace=True)
+    wifi_password = serializers.CharField(max_length=128, required=False, allow_blank=True, trim_whitespace=False, write_only=True)
     delivery_channel = serializers.ChoiceField(
         choices=[choice[0] for choice in DWDProvisioning.DELIVERY_CHANNEL_CHOICES],
         default=DWDProvisioning.CHANNEL_MANUAL,
@@ -444,9 +828,17 @@ class DWDProvisioningCreateSerializer(serializers.Serializer):
     def create(self, validated_data):
         for key in ("application_id", "user_id", "device_id"):
             validated_data.pop(key, None)
+        validated_data["code_generated_at"] = timezone.now()
+        validated_data["firmware_code"] = generate_mqtt_wifi_firmware(
+            device=validated_data.get("device"),
+            firmware_version=validated_data.get("firmware_version", ""),
+            wifi_ssid=validated_data.get("wifi_ssid", ""),
+            wifi_password=validated_data.get("wifi_password", ""),
+            request=self.context.get("request"),
+        )
         validated_data["delivery_status"] = (
             DWDProvisioning.DELIVERY_INSTRUCTION_READY
-            if validated_data.get("instruction_text")
+            if validated_data.get("instruction_text") or validated_data.get("firmware_code")
             else DWDProvisioning.DELIVERY_FIRMWARE_ASSIGNED
         )
         provisioning = DWDProvisioning.objects.create(**validated_data)
@@ -471,6 +863,15 @@ class DWDProvisioningCreateSerializer(serializers.Serializer):
                 "firmware_type": provisioning.firmware_type,
             },
         )
+        notify_user(
+            provisioning.user,
+            notification_type=DWDNotification.TYPE_PROVISIONING_READY,
+            title="Прошивка готова",
+            message="Администратор подготовил код прошивки для вашего DWD-устройства.",
+            application=provisioning.application,
+            device=provisioning.device,
+            provisioning=provisioning,
+        )
         return provisioning
 
 
@@ -481,6 +882,7 @@ class DWDProvisioningSerializer(serializers.ModelSerializer):
     sent_by = serializers.SerializerMethodField()
     sent_at = serializers.SerializerMethodField()
     sent_status = serializers.CharField(source="delivery_status", read_only=True)
+    wifi_configured = serializers.SerializerMethodField()
 
     class Meta:
         model = DWDProvisioning
@@ -492,6 +894,10 @@ class DWDProvisioningSerializer(serializers.ModelSerializer):
             "firmware_type",
             "firmware_version",
             "instruction_text",
+            "firmware_code",
+            "code_generated_at",
+            "wifi_ssid",
+            "wifi_configured",
             "delivery_status",
             "sent_status",
             "delivery_channel",
@@ -519,6 +925,10 @@ class DWDProvisioningSerializer(serializers.ModelSerializer):
     def get_sent_at(self, obj):
         return utc_iso(obj.sent_at)
 
+    @extend_schema_field(OpenApiTypes.BOOL)
+    def get_wifi_configured(self, obj):
+        return bool(obj.wifi_ssid and obj.wifi_password)
+
 
 class DWDDeviceEventSerializer(serializers.ModelSerializer):
     device_code = serializers.CharField(source="device.device_code", read_only=True)
@@ -533,6 +943,42 @@ class ProviderDashboardSerializer(serializers.Serializer):
     applications = DWDProviderApplicationSerializer(many=True)
     devices = DWDDeviceSerializer(many=True)
     provisioning = DWDProvisioningSerializer(many=True)
+
+
+class DWDNotificationSerializer(serializers.ModelSerializer):
+    application_id = serializers.IntegerField(read_only=True)
+    device_id = serializers.IntegerField(read_only=True)
+    provisioning_id = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = DWDNotification
+        fields = (
+            "id",
+            "notification_type",
+            "title",
+            "message",
+            "application_id",
+            "device_id",
+            "provisioning_id",
+            "is_read",
+            "created_at",
+        )
+
+
+class DWDSupportMessageSerializer(serializers.ModelSerializer):
+    sender = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DWDSupportMessage
+        fields = ("id", "application", "sender", "message", "is_system", "created_at")
+
+    @extend_schema_field(USER_SUMMARY_RESPONSE)
+    def get_sender(self, obj):
+        return user_payload(obj.sender)
+
+
+class DWDSupportMessageCreateSerializer(serializers.Serializer):
+    message = serializers.CharField(allow_blank=False, trim_whitespace=True)
 
 
 class DWDProviderApplicationListCreateView(APIView):
@@ -594,6 +1040,92 @@ class ProviderDashboardView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+def accessible_application_queryset(user):
+    queryset = DWDProviderApplication.objects.select_related("user", "reviewed_by")
+    if user.is_staff:
+        return queryset
+    return queryset.filter(user=user)
+
+
+class DWDNotificationsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description="Current user's DWD notifications.",
+        responses=dwd_responses(DWDNotificationSerializer(many=True)),
+    )
+    def get(self, request):
+        notifications = DWDNotification.objects.filter(recipient=request.user)
+        unread_only = str(request.query_params.get("unread", "")).lower() in {"1", "true", "yes"}
+        if unread_only:
+            notifications = notifications.filter(is_read=False)
+        try:
+            limit = min(max(int(request.query_params.get("limit", 50)), 1), 200)
+        except ValueError:
+            return Response({"detail": "limit must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(DWDNotificationSerializer(notifications[:limit], many=True).data, status=status.HTTP_200_OK)
+
+
+class DWDNotificationReadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description="Mark a DWD notification as read.",
+        request=None,
+        responses=dwd_responses(DWDNotificationSerializer),
+    )
+    def post(self, request, pk: int):
+        notification = get_object_or_404(DWDNotification, pk=pk, recipient=request.user)
+        notification.is_read = True
+        notification.save(update_fields=["is_read"])
+        return Response(DWDNotificationSerializer(notification).data, status=status.HTTP_200_OK)
+
+
+class DWDApplicationMessagesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description="Support chat messages for a DWD provider application. Admins can read any application; users can read their own.",
+        responses=dwd_responses(DWDSupportMessageSerializer(many=True)),
+    )
+    def get(self, request, pk: int):
+        application = get_object_or_404(accessible_application_queryset(request.user), pk=pk)
+        messages = application.support_messages.select_related("sender")
+        return Response(DWDSupportMessageSerializer(messages, many=True).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        description="Send a support chat message for a DWD provider application.",
+        request=DWDSupportMessageCreateSerializer,
+        responses=dwd_responses(created_schema=DWDSupportMessageSerializer),
+    )
+    def post(self, request, pk: int):
+        application = get_object_or_404(accessible_application_queryset(request.user), pk=pk)
+        serializer = DWDSupportMessageCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        message = DWDSupportMessage.objects.create(
+            application=application,
+            sender=request.user,
+            message=serializer.validated_data["message"],
+        )
+        if request.user.is_staff:
+            notify_user(
+                application.user,
+                notification_type=DWDNotification.TYPE_CHAT_MESSAGE,
+                title="Новое сообщение от администратора",
+                message=message.message[:240],
+                application=application,
+            )
+        else:
+            notify_admins(
+                notification_type=DWDNotification.TYPE_CHAT_MESSAGE,
+                title="Новое сообщение от provider",
+                message=f"{request.user.get_username()}: {message.message[:200]}",
+                application=application,
+                exclude_user_id=request.user.pk,
+            )
+        return Response(DWDSupportMessageSerializer(message).data, status=status.HTTP_201_CREATED)
 
 
 class AdminDWDUsersView(APIView):
@@ -780,6 +1312,20 @@ class AdminDWDApplicationApproveView(APIView):
                 "admin_id": request.user.pk,
             },
         )
+        DWDSupportMessage.objects.create(
+            application=application,
+            sender=request.user,
+            is_system=True,
+            message="Заявка одобрена. Администратор подготовит код прошивки и инструкцию.",
+        )
+        notify_user(
+            application.user,
+            notification_type=DWDNotification.TYPE_STATUS_CHANGED,
+            title="Заявка DWD одобрена",
+            message="Теперь администратор может подготовить прошивку для вашего устройства.",
+            application=application,
+            device=device,
+        )
         return Response(DWDProviderApplicationSerializer(application).data, status=status.HTTP_200_OK)
 
 
@@ -804,6 +1350,19 @@ class AdminDWDApplicationRejectView(APIView):
             source="admin",
             message=f"Application {application.pk} rejected by admin {request.user.pk}",
             payload={"application_id": application.pk, "user_id": application.user_id, "admin_id": request.user.pk},
+        )
+        DWDSupportMessage.objects.create(
+            application=application,
+            sender=request.user,
+            is_system=True,
+            message="Заявка отклонена. Если нужны детали, напишите администратору в чате поддержки.",
+        )
+        notify_user(
+            application.user,
+            notification_type=DWDNotification.TYPE_STATUS_CHANGED,
+            title="Заявка DWD отклонена",
+            message="Администратор отклонил заявку. Детали можно уточнить в чате поддержки.",
+            application=application,
         )
         return Response(DWDProviderApplicationSerializer(application).data, status=status.HTTP_200_OK)
 
@@ -957,7 +1516,7 @@ class AdminDWDProvisioningView(APIView):
         responses=dwd_responses(created_schema=DWDProvisioningSerializer),
     )
     def post(self, request):
-        serializer = DWDProvisioningCreateSerializer(data=request.data)
+        serializer = DWDProvisioningCreateSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         provisioning = serializer.save()
         return Response(DWDProvisioningSerializer(provisioning).data, status=status.HTTP_201_CREATED)
@@ -996,5 +1555,14 @@ class AdminDWDProvisioningMarkSentView(APIView):
                 "sent_by": request.user.pk,
                 "delivery_channel": provisioning.delivery_channel,
             },
+        )
+        notify_user(
+            provisioning.user,
+            notification_type=DWDNotification.TYPE_PROVISIONING_READY,
+            title="Инструкция отмечена как отправленная",
+            message="Администратор отметил, что инструкция отправлена вручную.",
+            application=provisioning.application,
+            device=provisioning.device,
+            provisioning=provisioning,
         )
         return Response(DWDProvisioningSerializer(provisioning).data, status=status.HTTP_200_OK)

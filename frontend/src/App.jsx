@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  Bell,
   ChevronLeft,
   ChevronRight,
   CheckCircle2,
   CloudSun,
+  Copy,
   Cpu,
   Droplets,
   ExternalLink,
@@ -13,6 +15,7 @@ import {
   LogIn,
   LogOut,
   MapPin,
+  MessageCircle,
   Moon,
   Radio,
   RefreshCw,
@@ -49,14 +52,18 @@ import {
   listAdminDwdDevices,
   listAdminDwdProvisioning,
   listAdminDwdUsers,
+  listDwdApplicationMessages,
+  listDwdNotifications,
   listStationRequests,
   listProviderApplications,
   login,
   markDwdProvisioningSent,
+  markDwdNotificationRead,
   readTokens,
   rejectDwdApplication,
   runAdminDwdDeviceAction,
   saveTokens,
+  sendDwdApplicationMessage,
   signup,
   startTelegram2FASetup,
   updateTelegram2FASettings,
@@ -102,9 +109,11 @@ const DEFAULT_PROVISIONING_FORM = {
   application_id: "",
   user_id: "",
   device_id: "",
-  firmware_type: "serial_bridge",
+  firmware_type: "esp01_wifi",
   firmware_version: "1.0.0",
-  instruction_text: FIRMWARE_TEMPLATES.serial_bridge,
+  instruction_text: FIRMWARE_TEMPLATES.esp01_wifi,
+  wifi_ssid: "",
+  wifi_password: "",
   delivery_channel: "email",
   notes: "",
 };
@@ -241,6 +250,9 @@ function App() {
   const [dwdForm, setDwdForm] = useState(DEFAULT_DWD_FORM);
   const [dwdApplications, setDwdApplications] = useState([]);
   const [providerDashboard, setProviderDashboard] = useState(null);
+  const [dwdNotifications, setDwdNotifications] = useState([]);
+  const [dwdMessages, setDwdMessages] = useState({});
+  const [chatDrafts, setChatDrafts] = useState({});
   const [adminDwdUsers, setAdminDwdUsers] = useState([]);
   const [adminDwdApplications, setAdminDwdApplications] = useState([]);
   const [adminDwdDevices, setAdminDwdDevices] = useState([]);
@@ -280,6 +292,9 @@ function App() {
       setExtendedLoadedKey("");
       setDwdApplications([]);
       setProviderDashboard(null);
+      setDwdNotifications([]);
+      setDwdMessages({});
+      setChatDrafts({});
       setAdminDwdUsers([]);
       setAdminDwdApplications([]);
       setAdminDwdDevices([]);
@@ -348,6 +363,7 @@ function App() {
     stationLatest,
     dwdApplications.length,
     providerDashboard,
+    dwdNotifications.length,
     adminDwdUsers.length,
     adminDwdApplications.length,
     adminDwdDevices.length,
@@ -724,6 +740,9 @@ function App() {
 
     const ownApplications = await listProviderApplications(nextTokens);
     setDwdApplications(Array.isArray(ownApplications) ? ownApplications : []);
+    const messageApplications = Array.isArray(ownApplications) ? [...ownApplications] : [];
+    const notifications = await listDwdNotifications(nextTokens, { limit: 50 });
+    setDwdNotifications(Array.isArray(notifications) ? notifications : []);
     try {
       setProviderDashboard(await getProviderDashboard(nextTokens));
     } catch (error) {
@@ -744,6 +763,7 @@ function App() {
       ]);
       setAdminDwdUsers(Array.isArray(users) ? users : []);
       setAdminDwdApplications(Array.isArray(applications) ? applications : []);
+      if (Array.isArray(applications)) messageApplications.push(...applications);
       setAdminDwdDevices(Array.isArray(devices) ? devices : []);
       setAdminDwdProvisioning(Array.isArray(provisioning) ? provisioning : []);
       setAdminDwdEvents(Array.isArray(events) ? events : []);
@@ -764,6 +784,7 @@ function App() {
         setAdminIotStatus(null);
         setIotConfigForm(DEFAULT_IOT_CONFIG_FORM);
         setIsDwdAdmin(false);
+        await refreshDwdMessages(messageApplications, nextTokens);
         return;
       }
       if (error.status === 401) {
@@ -772,6 +793,22 @@ function App() {
       }
       throw error;
     }
+    await refreshDwdMessages(messageApplications, nextTokens);
+  }
+
+  async function refreshDwdMessages(applications, nextTokens = tokens) {
+    const ids = [...new Set((applications || []).map((item) => item?.id).filter(Boolean))];
+    if (!ids.length || !nextTokens?.access) return;
+    const entries = await Promise.all(ids.map(async (id) => {
+      try {
+        const messages = await listDwdApplicationMessages(id, nextTokens);
+        return [id, Array.isArray(messages) ? messages : []];
+      } catch (error) {
+        if (error.status === 403 || error.status === 404) return [id, []];
+        throw error;
+      }
+    }));
+    setDwdMessages((current) => ({ ...current, ...Object.fromEntries(entries) }));
   }
 
   async function loadDwd(nextTokens = tokens) {
@@ -848,6 +885,27 @@ function App() {
     });
   }
 
+  async function handleNotificationRead(notificationId) {
+    await runTask("dwd", async () => {
+      await markDwdNotificationRead(notificationId, tokens);
+      const notifications = await listDwdNotifications(tokens, { limit: 50 });
+      setDwdNotifications(Array.isArray(notifications) ? notifications : []);
+    });
+  }
+
+  async function handleSupportMessageSubmit(applicationId) {
+    const draft = (chatDrafts[applicationId] || "").trim();
+    if (!draft) return;
+    await runTask("dwd", async () => {
+      await sendDwdApplicationMessage(applicationId, draft, tokens);
+      setChatDrafts((current) => ({ ...current, [applicationId]: "" }));
+      const messages = await listDwdApplicationMessages(applicationId, tokens);
+      setDwdMessages((current) => ({ ...current, [applicationId]: Array.isArray(messages) ? messages : [] }));
+      const notifications = await listDwdNotifications(tokens, { limit: 50 });
+      setDwdNotifications(Array.isArray(notifications) ? notifications : []);
+    });
+  }
+
   async function handleDevicePatch(deviceId, payload) {
     await runTask("dwd", async () => {
       await updateAdminDwdDevice(deviceId, payload, tokens);
@@ -901,6 +959,8 @@ function App() {
       firmware_type: provisioningForm.firmware_type,
       firmware_version: provisioningForm.firmware_version,
       instruction_text: provisioningForm.instruction_text,
+      wifi_ssid: provisioningForm.wifi_ssid,
+      wifi_password: provisioningForm.wifi_password,
       delivery_channel: provisioningForm.delivery_channel,
       notes: provisioningForm.notes,
       internal_note: provisioningForm.notes,
@@ -962,6 +1022,7 @@ function App() {
   }, [weather]);
 
   const isAuthPage = pathname.includes("login") || pathname.includes("register");
+  const unreadDwdCount = dwdNotifications.filter((item) => !item.is_read).length;
 
   return (
     <div className={`app-shell ${themeBurst ? "theme-burst" : ""}`} style={heroStyle}>
@@ -990,6 +1051,10 @@ function App() {
           </button>
           {isAuthenticated && (
             <>
+              <button className="icon-button notification-button" onClick={() => navigate(profile?.is_staff || profile?.is_superuser || isDwdAdmin ? "/admin-panel/applications" : "/provider")} title="Уведомления">
+                <Bell size={18} />
+                {unreadDwdCount > 0 && <span className="notification-dot">{unreadDwdCount}</span>}
+              </button>
               <button className="icon-button" onClick={() => navigate("/profile")} title="Профиль">
                 <UserCircle size={18} />
               </button>
@@ -1042,8 +1107,14 @@ function App() {
           setDwdForm={setDwdForm}
           dwdApplications={dwdApplications}
           providerDashboard={providerDashboard}
+          notifications={dwdNotifications}
+          messagesByApplication={dwdMessages}
+          chatDrafts={chatDrafts}
           loading={loading.dwd}
           handleDwdApplicationSubmit={handleDwdApplicationSubmit}
+          onNotificationRead={handleNotificationRead}
+          onChatDraftChange={(applicationId, value) => setChatDrafts((current) => ({ ...current, [applicationId]: value }))}
+          onSupportMessageSubmit={handleSupportMessageSubmit}
           navigate={navigate}
         />
       ) : pathname.includes("profile") ? (
@@ -1080,6 +1151,9 @@ function App() {
           iotStatus={adminIotStatus}
           iotConfigForm={iotConfigForm}
           provisioningForm={provisioningForm}
+          notifications={dwdNotifications}
+          messagesByApplication={dwdMessages}
+          chatDrafts={chatDrafts}
           loading={loading.dwd}
           loadDwd={loadDwd}
           onRoleChange={handleDwdRoleChange}
@@ -1095,6 +1169,9 @@ function App() {
           onProvisioningSent={handleProvisioningSent}
           onIotConfigFieldChange={handleIotConfigField}
           onIotConfigSubmit={handleIotConfigSubmit}
+          onNotificationRead={handleNotificationRead}
+          onChatDraftChange={(applicationId, value) => setChatDrafts((current) => ({ ...current, [applicationId]: value }))}
+          onSupportMessageSubmit={handleSupportMessageSubmit}
           navigate={navigate}
         />
       ) : (
@@ -1276,7 +1353,23 @@ function AboutPage() {
   );
 }
 
-function ProviderPage({ isAuthenticated, dwdForm, setDwdForm, dwdApplications, providerDashboard, loading, handleDwdApplicationSubmit, navigate }) {
+function ProviderPage({
+  isAuthenticated,
+  dwdForm,
+  setDwdForm,
+  dwdApplications,
+  providerDashboard,
+  notifications,
+  messagesByApplication,
+  chatDrafts,
+  loading,
+  handleDwdApplicationSubmit,
+  onNotificationRead,
+  onChatDraftChange,
+  onSupportMessageSubmit,
+  navigate,
+}) {
+  const activeApplication = dwdApplications[0] || providerDashboard?.applications?.[0] || null;
   return (
     <main className="page-shell">
       <section className="provider-page glass-panel reveal is-visible">
@@ -1300,7 +1393,19 @@ function ProviderPage({ isAuthenticated, dwdForm, setDwdForm, dwdApplications, p
               onSubmit={handleDwdApplicationSubmit}
             />
             <DwdApplicationsList applications={dwdApplications} />
+            <NotificationsPanel notifications={notifications} onRead={onNotificationRead} />
             <ProviderCabinet dashboard={providerDashboard} />
+            {activeApplication && (
+              <SupportChat
+                application={activeApplication}
+                messages={messagesByApplication[activeApplication.id] || []}
+                draft={chatDrafts[activeApplication.id] || ""}
+                loading={loading}
+                onDraftChange={onChatDraftChange}
+                onSend={onSupportMessageSubmit}
+                title="Чат с администратором"
+              />
+            )}
           </>
         ) : (
           <AccessGate navigate={navigate} text="Войдите, чтобы подать заявку DWD provider." />
@@ -1516,6 +1621,9 @@ function AdminPanelPage({
   iotStatus,
   iotConfigForm,
   provisioningForm,
+  notifications,
+  messagesByApplication,
+  chatDrafts,
   loading,
   loadDwd,
   onRoleChange,
@@ -1531,6 +1639,9 @@ function AdminPanelPage({
   onProvisioningSent,
   onIotConfigFieldChange,
   onIotConfigSubmit,
+  onNotificationRead,
+  onChatDraftChange,
+  onSupportMessageSubmit,
   navigate,
 }) {
   const adminSections = [
@@ -1561,6 +1672,12 @@ function AdminPanelPage({
           onReject={onReject}
           onApplicationNote={onApplicationNote}
           onPrepareProvisioning={onPrepareProvisioning}
+          notifications={notifications}
+          messagesByApplication={messagesByApplication}
+          chatDrafts={chatDrafts}
+          onNotificationRead={onNotificationRead}
+          onChatDraftChange={onChatDraftChange}
+          onSupportMessageSubmit={onSupportMessageSubmit}
           navigate={navigate}
         />
       );
@@ -1689,10 +1806,26 @@ function AdminUsersPage({ users, loading, onRoleChange, onUserDelete }) {
   );
 }
 
-function AdminApplicationsPage({ applications, selectedApplicationId, loading, onApprove, onReject, onApplicationNote, onPrepareProvisioning, navigate }) {
+function AdminApplicationsPage({
+  applications,
+  selectedApplicationId,
+  loading,
+  onApprove,
+  onReject,
+  onApplicationNote,
+  onPrepareProvisioning,
+  notifications,
+  messagesByApplication,
+  chatDrafts,
+  onNotificationRead,
+  onChatDraftChange,
+  onSupportMessageSubmit,
+  navigate,
+}) {
   const selected = applications.find((item) => String(item.id) === String(selectedApplicationId));
   return (
     <div className="admin-page-grid">
+      <NotificationsPanel notifications={notifications} onRead={onNotificationRead} />
       <AdminTableCard title="Заявки DWD provider" icon={<FileText size={20} />}>
         <div className="admin-table admin-table-applications">
           <div className="admin-row admin-row-head">
@@ -1721,13 +1854,26 @@ function AdminApplicationsPage({ applications, selectedApplicationId, loading, o
           loading={loading}
           onApplicationNote={onApplicationNote}
           onPrepareProvisioning={onPrepareProvisioning}
+          messages={messagesByApplication[selected.id] || []}
+          chatDraft={chatDrafts[selected.id] || ""}
+          onChatDraftChange={onChatDraftChange}
+          onSupportMessageSubmit={onSupportMessageSubmit}
         />
       )}
     </div>
   );
 }
 
-function ApplicationDetailCard({ application, loading, onApplicationNote, onPrepareProvisioning }) {
+function ApplicationDetailCard({
+  application,
+  loading,
+  onApplicationNote,
+  onPrepareProvisioning,
+  messages,
+  chatDraft,
+  onChatDraftChange,
+  onSupportMessageSubmit,
+}) {
   const [note, setNote] = useState(application.admin_note || "");
   useEffect(() => setNote(application.admin_note || ""), [application.id, application.admin_note]);
   return (
@@ -1751,6 +1897,15 @@ function ApplicationDetailCard({ application, loading, onApplicationNote, onPrep
         {application.status === "approved" && <button className="icon-text-button" type="button" onClick={() => onPrepareProvisioning(application)}>Подготовить прошивку</button>}
       </div>
       {application.device && <DeviceSummary device={application.device} />}
+      <SupportChat
+        application={application}
+        messages={messages}
+        draft={chatDraft}
+        loading={loading}
+        onDraftChange={onChatDraftChange}
+        onSend={onSupportMessageSubmit}
+        title="Чат поддержки"
+      />
     </article>
   );
 }
@@ -2092,10 +2247,10 @@ function ProvisioningForm({ applications, provisioningForm, loading, onPreparePr
         </select>
       </label>
       <label>
-        <span>Тип firmware</span>
+        <span>Тип прошивки</span>
         <select value={provisioningForm.firmware_type} onChange={(event) => onProvisioningFieldChange("firmware_type", event.target.value)}>
           <option value="serial_bridge">serial_bridge</option>
-          <option value="esp01_wifi">esp01_wifi</option>
+          <option value="esp01_wifi">MQTT Wi-Fi</option>
           <option value="ethernet_shield">ethernet_shield</option>
         </select>
       </label>
@@ -2111,16 +2266,36 @@ function ProvisioningForm({ applications, provisioningForm, loading, onPreparePr
         </select>
       </label>
       <label className="wide-field">
+        <span>Wi-Fi SSID <em>необязательно</em></span>
+        <input
+          value={provisioningForm.wifi_ssid}
+          onChange={(event) => onProvisioningFieldChange("wifi_ssid", event.target.value)}
+          placeholder="Провайдер может оставить пустым"
+        />
+      </label>
+      <label className="wide-field">
+        <span>Wi-Fi password <em>необязательно</em></span>
+        <input
+          type="password"
+          value={provisioningForm.wifi_password}
+          onChange={(event) => onProvisioningFieldChange("wifi_password", event.target.value)}
+          placeholder="Если пусто, в коде останется placeholder"
+        />
+      </label>
+      <label className="wide-field">
         <span>Текст инструкции</span>
         <textarea value={provisioningForm.instruction_text} onChange={(event) => onProvisioningFieldChange("instruction_text", event.target.value)} required />
       </label>
+      <p className="empty-state wide-field">
+        После сохранения backend автоматически сгенерирует Arduino MQTT Wi-Fi код с station_id, MQTT topic и ключами устройства.
+      </p>
       <label className="wide-field">
         <span>Внутренняя заметка</span>
         <textarea value={provisioningForm.notes} onChange={(event) => onProvisioningFieldChange("notes", event.target.value)} placeholder="Видно только администратору" />
       </label>
       <button className="primary-button" type="submit" disabled={loading || !provisioningForm.application_id}>
         {loading ? <RefreshCw className="spin" size={18} /> : <FileText size={18} />}
-        Сохранить инструкцию
+        Сгенерировать код
       </button>
     </form>
   );
@@ -2136,6 +2311,7 @@ function ProvisioningList({ records, loading, onProvisioningSent, showInstructio
             <small>{formatUser(record.user)} / {record.device?.city || "устройство не привязано"}</small>
             <small>Статус: {statusLabel(record.delivery_status)}; отправил: {record.sent_by?.username || "никто"} {record.sent_at ? `· ${formatDate(record.sent_at)}` : ""}</small>
             {showInstruction && <small>{record.instruction_text}</small>}
+            {showInstruction && <FirmwareCodeBlock code={record.firmware_code} />}
           </div>
           <div className="row-actions">
             <StatusPill value={record.delivery_status} />
@@ -2220,12 +2396,102 @@ function statusLabel(value) {
     settings_changed: "настройки изменены",
     telegram_linked: "Telegram привязан",
     telegram_not_linked: "Telegram не привязан",
+    application_submitted: "новая заявка",
+    status_changed: "статус изменён",
+    provisioning_ready: "прошивка готова",
+    chat_message: "сообщение",
   };
   return labels[value] || value || "нет";
 }
 
 function StatusPill({ value }) {
   return <span className={`status-pill status-${value || "empty"}`}>{statusLabel(value)}</span>;
+}
+
+function NotificationsPanel({ notifications = [], onRead }) {
+  if (!notifications.length) return null;
+  return (
+    <article className="dwd-card notifications-panel">
+      <div className="panel-title">
+        <Bell size={20} />
+        <h3>Уведомления</h3>
+      </div>
+      <div className="dwd-list">
+        {notifications.slice(0, 6).map((notification) => (
+          <div className={`dwd-list-item notification-item ${notification.is_read ? "" : "is-unread"}`} key={notification.id}>
+            <div>
+              <strong>{notification.title}</strong>
+              <small>{notification.message || statusLabel(notification.notification_type)}</small>
+              <small>{formatDate(notification.created_at)}</small>
+            </div>
+            {!notification.is_read && (
+              <button className="icon-text-button" type="button" onClick={() => onRead(notification.id)}>
+                Прочитано
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function SupportChat({ application, messages = [], draft = "", loading, onDraftChange, onSend, title }) {
+  if (!application) return null;
+  return (
+    <article className="dwd-card support-chat">
+      <div className="panel-title">
+        <MessageCircle size={20} />
+        <h3>{title}</h3>
+      </div>
+      <div className="chat-thread">
+        {messages.length ? messages.map((message) => (
+          <div className={`chat-message ${message.is_system ? "is-system" : ""}`} key={message.id}>
+            <strong>{message.is_system ? "Система" : (message.sender?.username || "Пользователь")}</strong>
+            <p>{message.message}</p>
+            <small>{formatDate(message.created_at)}</small>
+          </div>
+        )) : (
+          <p className="empty-state">Сообщений пока нет. Здесь можно уточнить детали заявки и прошивки.</p>
+        )}
+      </div>
+      <form
+        className="chat-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSend(application.id);
+        }}
+      >
+        <input
+          value={draft}
+          onChange={(event) => onDraftChange(application.id, event.target.value)}
+          placeholder="Напишите сообщение"
+        />
+        <button className="primary-button" type="submit" disabled={loading || !draft.trim()}>
+          <Send size={16} />
+          Отправить
+        </button>
+      </form>
+    </article>
+  );
+}
+
+function FirmwareCodeBlock({ code }) {
+  if (!code) {
+    return <small>Код прошивки появится после подготовки provisioning.</small>;
+  }
+  return (
+    <div className="firmware-code">
+      <div className="firmware-code-header">
+        <span>Сгенерированный код</span>
+        <button className="icon-text-button" type="button" onClick={() => navigator.clipboard?.writeText(code)}>
+          <Copy size={15} />
+          Скопировать
+        </button>
+      </div>
+      <pre>{code}</pre>
+    </div>
+  );
 }
 
 function DwdApplicationForm({ form, loading, setForm, onSubmit }) {
@@ -2339,6 +2605,8 @@ function ProviderCabinet({ dashboard }) {
                   <strong>{record.firmware_type} {record.firmware_version}</strong>
                   <small>Статус: {statusLabel(record.delivery_status)}</small>
                   <small>{record.instruction_text}</small>
+                  <small>{record.wifi_configured ? "Wi-Fi уже вписан в код" : "Wi-Fi можно вписать вручную в Arduino IDE"}</small>
+                  <FirmwareCodeBlock code={record.firmware_code} />
                 </div>
                 <StatusPill value={record.delivery_status} />
               </div>

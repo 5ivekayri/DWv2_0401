@@ -15,8 +15,10 @@ from django.utils import timezone as django_timezone
 from server.models import (
     DWDDevice,
     DWDDeviceEvent,
+    DWDNotification,
     DWDProviderApplication,
     DWDProvisioning,
+    DWDSupportMessage,
     ExtendedWeatherSnapshot,
     IoTConfiguration,
     ProviderHealth,
@@ -986,6 +988,13 @@ class DWDProviderApplicationApiTests(TestCase):
         self.assertEqual(application.email, "device-contact@example.com")
         self.assertEqual(application.user, self.user)
         self.assertEqual(application.status, DWDProviderApplication.STATUS_PENDING)
+        self.assertTrue(
+            DWDNotification.objects.filter(
+                recipient=self.admin,
+                notification_type=DWDNotification.TYPE_APPLICATION_SUBMITTED,
+                application=application,
+            ).exists()
+        )
 
     def test_user_cannot_create_second_pending_application(self):
         self.create_application(city="Berlin")
@@ -1012,7 +1021,22 @@ class DWDProviderApplicationApiTests(TestCase):
         self.assertTrue(application.device.device_code)
         self.assertTrue(application.device.token)
         self.assertTrue(application.device.events.filter(event_type=DWDDeviceEvent.EVENT_REGISTERED).exists())
+        self.assertTrue(application.support_messages.filter(is_system=True).exists())
+        self.assertTrue(
+            DWDNotification.objects.filter(
+                recipient=self.user,
+                notification_type=DWDNotification.TYPE_STATUS_CHANGED,
+                application=application,
+            ).exists()
+        )
 
+    @override_settings(
+        MQTT_HOST="127.0.0.1",
+        MQTT_PORT=1883,
+        MQTT_USERNAME="darkweather_device",
+        MQTT_PASSWORD="mqtt-secret",
+        DWD_MQTT_PUBLIC_HOST="mqtt.darkweather.test",
+    )
     def test_admin_can_create_and_mark_provisioning_sent(self):
         application = self.create_application(city="Berlin")
         self.approve_application(application)
@@ -1026,6 +1050,8 @@ class DWDProviderApplicationApiTests(TestCase):
                 "firmware_type": "esp01_wifi",
                 "firmware_version": "1.0.0",
                 "instruction_text": "Open Arduino IDE, configure Wi-Fi and upload ESP-01 firmware.",
+                "wifi_ssid": "ProviderNet",
+                "wifi_password": "ProviderPass",
                 "delivery_channel": "email",
             },
             format="json",
@@ -1035,9 +1061,23 @@ class DWDProviderApplicationApiTests(TestCase):
         provisioning = DWDProvisioning.objects.get(pk=response.data["id"])
         self.assertEqual(provisioning.firmware_type, DWDProvisioning.FIRMWARE_ESP01_WIFI)
         self.assertIn("ESP-01", provisioning.instruction_text)
+        self.assertIn('const char* WIFI_SSID = "ProviderNet";', provisioning.firmware_code)
+        self.assertIn('const char* WIFI_PASSWORD = "ProviderPass";', provisioning.firmware_code)
+        self.assertIn('const char* MQTT_HOST = "mqtt.darkweather.test";', provisioning.firmware_code)
+        self.assertIn(f'const char* STATION_ID = "{application.device.station_id}";', provisioning.firmware_code)
+        self.assertIn(f'darkweather/stations/{application.device.station_id}/readings', provisioning.firmware_code)
+        self.assertTrue(response.data["wifi_configured"])
         self.assertEqual(provisioning.delivery_status, DWDProvisioning.DELIVERY_INSTRUCTION_READY)
+        self.assertIsNotNone(provisioning.code_generated_at)
         application.device.refresh_from_db()
         self.assertEqual(application.device.firmware_type, DWDProvisioning.FIRMWARE_ESP01_WIFI)
+        self.assertTrue(
+            DWDNotification.objects.filter(
+                recipient=self.user,
+                notification_type=DWDNotification.TYPE_PROVISIONING_READY,
+                provisioning=provisioning,
+            ).exists()
+        )
 
         sent = self.client.post(f"/api/admin/dwd/provisioning/{provisioning.pk}/mark-sent/")
 
@@ -1046,6 +1086,30 @@ class DWDProviderApplicationApiTests(TestCase):
         self.assertEqual(provisioning.delivery_status, DWDProvisioning.DELIVERY_SENT)
         self.assertEqual(provisioning.sent_by, self.admin)
         self.assertIsNotNone(provisioning.sent_at)
+
+    @override_settings(MQTT_HOST="127.0.0.1", MQTT_PORT=1883, DWD_MQTT_PUBLIC_HOST="mqtt.darkweather.test")
+    def test_provisioning_without_wifi_creates_code_with_placeholders(self):
+        application = self.create_application(city="Berlin")
+        self.approve_application(application)
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.post(
+            "/api/admin/dwd/provisioning/",
+            {
+                "application_id": application.pk,
+                "device_id": application.device.pk,
+                "firmware_type": "esp01_wifi",
+                "firmware_version": "1.0.0",
+                "delivery_channel": "manual",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertFalse(response.data["wifi_configured"])
+        self.assertIn("PUT_WIFI_SSID_HERE", response.data["firmware_code"])
+        self.assertIn("PUT_WIFI_PASSWORD_HERE", response.data["firmware_code"])
+        self.assertNotIn("wifi_password", response.data)
 
     def test_admin_users_roles_and_device_events_endpoints(self):
         application = self.create_application(city="Berlin")
@@ -1100,6 +1164,67 @@ class DWDProviderApplicationApiTests(TestCase):
         self.assertEqual(self_delete.status_code, 400)
         self.assertEqual(deleted.status_code, 204)
         self.assertFalse(get_user_model().objects.filter(pk=target.pk).exists())
+
+    def test_provider_and_admin_can_chat_on_application(self):
+        application = self.create_application(city="Berlin")
+
+        provider_message = self.client.post(
+            f"/api/provider-applications/{application.pk}/messages/",
+            {"message": "Can I use Arduino R4 WiFi?"},
+            format="json",
+        )
+
+        self.assertEqual(provider_message.status_code, 201)
+        self.assertTrue(DWDSupportMessage.objects.filter(application=application, sender=self.user).exists())
+        self.assertTrue(
+            DWDNotification.objects.filter(
+                recipient=self.admin,
+                notification_type=DWDNotification.TYPE_CHAT_MESSAGE,
+                application=application,
+            ).exists()
+        )
+
+        self.client.force_authenticate(user=self.admin)
+        admin_message = self.client.post(
+            f"/api/admin/dwd/applications/{application.pk}/messages/",
+            {"message": "Yes, we will generate MQTT firmware for it."},
+            format="json",
+        )
+        messages = self.client.get(f"/api/admin/dwd/applications/{application.pk}/messages/")
+
+        self.assertEqual(admin_message.status_code, 201)
+        self.assertEqual(messages.status_code, 200)
+        self.assertGreaterEqual(len(messages.data), 2)
+        self.assertTrue(
+            DWDNotification.objects.filter(
+                recipient=self.user,
+                notification_type=DWDNotification.TYPE_CHAT_MESSAGE,
+                application=application,
+            ).exists()
+        )
+
+    def test_user_cannot_read_another_application_chat(self):
+        application = self.create_application(city="Berlin")
+        other = get_user_model().objects.create_user(username="other-user", password="password123")
+        self.client.force_authenticate(user=other)
+
+        response = self.client.get(f"/api/provider-applications/{application.pk}/messages/")
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_notification_endpoint_and_mark_read(self):
+        application = self.create_application(city="Berlin")
+        notification = DWDNotification.objects.filter(recipient=self.admin, application=application).first()
+        self.client.force_authenticate(user=self.admin)
+
+        listed = self.client.get("/api/dwd/notifications/")
+        marked = self.client.post(f"/api/dwd/notifications/{notification.pk}/read/")
+
+        self.assertEqual(listed.status_code, 200)
+        self.assertTrue(any(item["id"] == notification.pk for item in listed.data))
+        self.assertEqual(marked.status_code, 200)
+        notification.refresh_from_db()
+        self.assertTrue(notification.is_read)
 
     def test_regular_user_cannot_manage_provisioning(self):
         application = self.create_application(city="Berlin")

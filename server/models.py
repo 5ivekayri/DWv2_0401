@@ -522,6 +522,10 @@ class DWDProvisioning(models.Model):
     firmware_type = models.CharField(max_length=32, choices=FIRMWARE_CHOICES)
     firmware_version = models.CharField(max_length=64, blank=True, default="")
     instruction_text = models.TextField()
+    wifi_ssid = models.CharField(max_length=128, blank=True, default="")
+    wifi_password = models.CharField(max_length=128, blank=True, default="")
+    firmware_code = models.TextField(blank=True, default="")
+    code_generated_at = models.DateTimeField(null=True, blank=True)
     delivery_status = models.CharField(
         max_length=32,
         choices=DELIVERY_STATUS_CHOICES,
@@ -551,6 +555,90 @@ class DWDProvisioning(models.Model):
 
     def __str__(self) -> str:
         return f"{self.user_id} {self.firmware_type} {self.delivery_status}"
+
+
+class DWDNotification(models.Model):
+    TYPE_APPLICATION_SUBMITTED = "application_submitted"
+    TYPE_STATUS_CHANGED = "status_changed"
+    TYPE_PROVISIONING_READY = "provisioning_ready"
+    TYPE_CHAT_MESSAGE = "chat_message"
+
+    TYPE_CHOICES = [
+        (TYPE_APPLICATION_SUBMITTED, "Application submitted"),
+        (TYPE_STATUS_CHANGED, "Status changed"),
+        (TYPE_PROVISIONING_READY, "Provisioning ready"),
+        (TYPE_CHAT_MESSAGE, "Chat message"),
+    ]
+
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="dwd_notifications",
+    )
+    application = models.ForeignKey(
+        DWDProviderApplication,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="notifications",
+    )
+    device = models.ForeignKey(
+        DWDDevice,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="notifications",
+    )
+    provisioning = models.ForeignKey(
+        DWDProvisioning,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="notifications",
+    )
+    notification_type = models.CharField(max_length=32, choices=TYPE_CHOICES, db_index=True)
+    title = models.CharField(max_length=160)
+    message = models.TextField(blank=True, default="")
+    is_read = models.BooleanField(default=False, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["recipient", "is_read", "created_at"]),
+            models.Index(fields=["application", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.recipient_id} {self.notification_type} {self.created_at.isoformat()}"
+
+
+class DWDSupportMessage(models.Model):
+    application = models.ForeignKey(
+        DWDProviderApplication,
+        on_delete=models.CASCADE,
+        related_name="support_messages",
+    )
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="dwd_support_messages",
+    )
+    message = models.TextField()
+    is_system = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(fields=["application", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        sender = self.sender_id or "system"
+        return f"{self.application_id} {sender} {self.created_at.isoformat()}"
 
 
 class DWDDeviceEvent(models.Model):

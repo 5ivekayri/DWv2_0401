@@ -165,6 +165,7 @@ MQTT_BROKER_NAME = os.getenv("MQTT_BROKER_NAME", "mosquitto").strip()
 MQTT_ENABLED = os.getenv("MQTT_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 MQTT_USERNAME = os.getenv("MQTT_USERNAME", "").strip()
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
+DWD_MQTT_PUBLIC_HOST = os.getenv("DWD_MQTT_PUBLIC_HOST", "").strip()
 IOT_STATION_NAME = os.getenv("IOT_STATION_NAME", "Arduino Uno Weather Station").strip()
 IOT_FIXED_CITY = os.getenv("IOT_FIXED_CITY", "Saransk").strip()
 IOT_OFFLINE_AFTER_SECONDS = int(os.getenv("IOT_OFFLINE_AFTER_SECONDS", "3600"))

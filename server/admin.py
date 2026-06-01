@@ -3,8 +3,10 @@ from django.contrib import admin
 from .models import (
     DWDDevice,
     DWDDeviceEvent,
+    DWDNotification,
     DWDProviderApplication,
     DWDProvisioning,
+    DWDSupportMessage,
     ExtendedWeatherSnapshot,
     IoTConfiguration,
     StationRequestLog,
@@ -42,7 +44,23 @@ class DWDProvisioningAdmin(admin.ModelAdmin):
     )
     list_filter = ("firmware_type", "delivery_status", "delivery_channel", "created_at")
     search_fields = ("user__username", "user__email", "device__station_id", "firmware_version")
-    readonly_fields = ("created_at", "updated_at")
+    readonly_fields = ("created_at", "updated_at", "code_generated_at")
+
+
+@admin.register(DWDNotification)
+class DWDNotificationAdmin(admin.ModelAdmin):
+    list_display = ("id", "recipient", "notification_type", "title", "is_read", "created_at")
+    list_filter = ("notification_type", "is_read", "created_at")
+    search_fields = ("recipient__username", "recipient__email", "title", "message")
+    readonly_fields = ("created_at",)
+
+
+@admin.register(DWDSupportMessage)
+class DWDSupportMessageAdmin(admin.ModelAdmin):
+    list_display = ("id", "application", "sender", "is_system", "created_at")
+    list_filter = ("is_system", "created_at")
+    search_fields = ("application__city", "sender__username", "sender__email", "message")
+    readonly_fields = ("created_at",)
 
 
 @admin.register(DWDDeviceEvent)
