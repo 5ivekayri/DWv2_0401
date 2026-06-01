@@ -432,7 +432,14 @@ a {
 }
 
 .admin-table-station-requests .admin-row {
-  grid-template-columns: 1fr 0.9fr 0.7fr 0.8fr 0.7fr 1.4fr 1fr;
+  grid-template-columns: 0.9fr 1.1fr 0.85fr 0.7fr 0.7fr 0.8fr 1.2fr 1fr;
+}
+
+.admin-table-station-requests small {
+  display: block;
+  color: var(--soft-text);
+  font-size: 0.78rem;
+  font-weight: 700;
 }
 
 .admin-table-station-requests code {
@@ -440,6 +447,10 @@ a {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   color: var(--text);
+}
+
+.console-note {
+  margin: 12px 0 0;
 }
 
 .admin-row-head {

@@ -49,7 +49,6 @@ import {
   listAdminDwdDevices,
   listAdminDwdProvisioning,
   listAdminDwdUsers,
-  listAdminLogs,
   listStationRequests,
   listProviderApplications,
   login,
@@ -149,12 +148,22 @@ function formatNumber(value, digits = 1) {
   return Number(value).toFixed(digits);
 }
 
+function cleanRecommendationText(value) {
+  if (!value) return "";
+  return String(value)
+    .replace(/<\/?assistant>/gi, "")
+    .replace(/<\/?user>/gi, "")
+    .replace(/<\/?system>/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 function getErrorMessage(error) {
   if (!error) return "";
   if (error.status === 400) return error.message || "Проверьте поля формы.";
   if (error.status === 401) return "Сессия истекла или нужен вход.";
-  if (error.status === 503) return "AI сервис пока не настроен на backend.";
-  if (error.status === 502) return "Внешний погодный или AI сервис не ответил.";
+  if (error.status === 503) return "Сервис рекомендаций пока недоступен.";
+  if (error.status === 502) return "Погодный сервис временно не ответил.";
   return error.message || "Что-то пошло не так.";
 }
 
@@ -237,7 +246,6 @@ function App() {
   const [adminDwdDevices, setAdminDwdDevices] = useState([]);
   const [adminDwdProvisioning, setAdminDwdProvisioning] = useState([]);
   const [adminDwdEvents, setAdminDwdEvents] = useState([]);
-  const [adminSerialLogs, setAdminSerialLogs] = useState([]);
   const [adminStationRequests, setAdminStationRequests] = useState([]);
   const [adminIotConfig, setAdminIotConfig] = useState(null);
   const [adminIotStatus, setAdminIotStatus] = useState(null);
@@ -277,7 +285,6 @@ function App() {
       setAdminDwdDevices([]);
       setAdminDwdProvisioning([]);
       setAdminDwdEvents([]);
-      setAdminSerialLogs([]);
       setAdminStationRequests([]);
       setAdminIotConfig(null);
       setAdminIotStatus(null);
@@ -725,13 +732,12 @@ function App() {
     }
 
     try {
-      const [users, applications, devices, provisioning, events, serialLogs, stationRequests, iotConfig, iotStatus] = await Promise.all([
+      const [users, applications, devices, provisioning, events, stationRequests, iotConfig, iotStatus] = await Promise.all([
         listAdminDwdUsers(nextTokens),
         listAdminDwdApplications(nextTokens),
         listAdminDwdDevices(nextTokens),
         listAdminDwdProvisioning(nextTokens),
         listAdminDwdDeviceEvents(nextTokens, { limit: 200 }),
-        listAdminLogs(nextTokens, { source: "serial_bridge", limit: 100 }),
         listStationRequests(nextTokens, { limit: 100 }),
         getAdminIotConfig(nextTokens),
         getAdminIotStatus(nextTokens),
@@ -741,7 +747,6 @@ function App() {
       setAdminDwdDevices(Array.isArray(devices) ? devices : []);
       setAdminDwdProvisioning(Array.isArray(provisioning) ? provisioning : []);
       setAdminDwdEvents(Array.isArray(events) ? events : []);
-      setAdminSerialLogs(Array.isArray(serialLogs) ? serialLogs : []);
       setAdminStationRequests(Array.isArray(stationRequests?.results) ? stationRequests.results : []);
       setAdminIotConfig(iotConfig || null);
       setAdminIotStatus(iotStatus || null);
@@ -754,7 +759,6 @@ function App() {
         setAdminDwdDevices([]);
         setAdminDwdProvisioning([]);
         setAdminDwdEvents([]);
-        setAdminSerialLogs([]);
         setAdminStationRequests([]);
         setAdminIotConfig(null);
         setAdminIotStatus(null);
@@ -788,7 +792,7 @@ function App() {
     const email = dwdForm.email.trim();
     const comment = dwdForm.comment.trim();
     if (!city || !email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !comment) {
-      setNotice("DWD application requires city, valid email and comment.");
+      setNotice("Укажите город, корректный email и комментарий к заявке.");
       return;
     }
 
@@ -947,7 +951,7 @@ function App() {
       setAdminIotConfig(updated);
       setAdminIotStatus(status);
       setIotConfigForm(toIotConfigForm(updated));
-      setNotice("Настройки Serial Bridge сохранены.");
+      setNotice("Настройки приёма станций сохранены.");
     });
   }
 
@@ -1071,7 +1075,6 @@ function App() {
           devices={adminDwdDevices}
           provisioningRecords={adminDwdProvisioning}
           events={adminDwdEvents}
-          serialLogs={adminSerialLogs}
           stationRequests={adminStationRequests}
           iotConfig={adminIotConfig}
           iotStatus={adminIotStatus}
@@ -1098,9 +1101,9 @@ function App() {
       <main className="main-grid">
         <section className={`hero-panel glass-panel reveal is-visible ${sectionPulse === "weather" ? "section-pulse" : ""}`}>
           <div className="hero-copy">
-            <span className="eyebrow">Погодная панель</span>
+            <span className="eyebrow">Dark Weather</span>
             <h1>{coords.city || "Выбранная локация"}</h1>
-            <p>Погода из API, AI-рекомендации по одежде, история и телеметрия Arduino в одном интерфейсе.</p>
+            <p>Погода сейчас, совет по одежде, прогноз на несколько дней и данные ближайшей локальной станции.</p>
           </div>
 
           <form className="search-console" onSubmit={(event) => { event.preventDefault(); loadWeather(); }}>
@@ -1153,9 +1156,9 @@ function App() {
             <>
               <div className="panel-title">
                 <Sparkles size={20} />
-                <h2>Приватный доступ активен</h2>
+                <h2>Аккаунт подключён</h2>
               </div>
-              <p className="empty-state">Графики истории и Arduino-станция доступны ниже.</p>
+              <p className="empty-state">История погоды и локальная станция доступны ниже.</p>
             </>
           ) : (
             <>
@@ -1163,7 +1166,7 @@ function App() {
                 <Lock size={20} />
                 <h2>Нужен вход</h2>
               </div>
-              <p className="empty-state">Авторизуйтесь, чтобы увидеть графики истории и данные Arduino-станции.</p>
+              <p className="empty-state">Войдите в аккаунт, чтобы увидеть историю погоды и данные локальной станции.</p>
               <div className="access-actions">
                 <button className="primary-button" onClick={() => navigate("/login")}><LogIn size={18} />Войти</button>
                 <button className="icon-text-button" onClick={() => navigate("/register")}><UserPlus size={18} />Регистрация</button>
@@ -1194,7 +1197,7 @@ function App() {
               <span className="eyebrow">Доступно после входа</span>
               <h2>История погоды</h2>
             </div>
-            {!isAuthenticated && <span className="locked-pill">Нужен JWT</span>}
+            {!isAuthenticated && <span className="locked-pill">Нужен вход</span>}
           </div>
           {isAuthenticated ? (
             <div className="chart-grid">
@@ -1210,8 +1213,8 @@ function App() {
         <section className={`station-section glass-panel reveal ${sectionPulse === "station" ? "section-pulse" : ""}`} id="station">
           <div className="section-heading">
             <div>
-              <span className="eyebrow">Arduino-станция</span>
-              <h2>Локальная телеметрия</h2>
+              <span className="eyebrow">Локальная станция</span>
+              <h2>Локальная погода</h2>
             </div>
             {isAuthenticated && (
               <div className="station-controls">
@@ -1231,7 +1234,7 @@ function App() {
               </div>
             </>
           ) : (
-            <AccessGate navigate={navigate} text="Последние данные Arduino и история станции доступны только после входа." />
+            <AccessGate navigate={navigate} text="Последние данные локальной станции доступны только после входа." />
           )}
         </section>
 
@@ -1418,7 +1421,7 @@ function ProfilePage({
               <a href={telegram2FAForm.telegram_bot_url} target="_blank" rel="noreferrer">
                 {telegram2FAForm.telegram_bot_username} <ExternalLink size={14} />
               </a>
-              . После нажатия “Получить код” напишите боту любое сообщение. На backend должна быть запущена команда polling.
+              . После нажатия “Получить код” напишите боту любое сообщение, и код придёт в Telegram.
             </p>
             <form className="profile-form nested-form" onSubmit={handleTelegram2FAStart}>
               <label>
@@ -1508,7 +1511,6 @@ function AdminPanelPage({
   devices,
   provisioningRecords,
   events,
-  serialLogs,
   stationRequests,
   iotConfig,
   iotStatus,
@@ -1537,10 +1539,11 @@ function AdminPanelPage({
     ["provisioning", "Выдача прошивки"],
     ["devices", "Устройства"],
     ["events", "События устройств"],
-    ["serial", "Serial Bridge"],
+    ["console", "Консоль"],
     ["instructions", "Инструкции"],
   ];
-  const currentSection = adminSections.find(([key]) => pathname.includes(`/admin-panel/${key}`))?.[0] || "users";
+  const currentSection = adminSections.find(([key]) => pathname.includes(`/admin-panel/${key}`))?.[0]
+    || (pathname.includes("/admin-panel/serial") ? "console" : "users");
   const selectedApplicationId = pathname.match(/\/admin-panel\/applications\/(\d+)/)?.[1];
   const selectedDeviceId = pathname.match(/\/admin-panel\/devices\/(\d+)/)?.[1];
 
@@ -1589,18 +1592,11 @@ function AdminPanelPage({
     if (currentSection === "events") {
       return <AdminDeviceEventsPage events={events} devices={devices} />;
     }
-    if (currentSection === "serial") {
+    if (currentSection === "console") {
       return (
-        <AdminSerialBridgePage
-          iotConfig={iotConfig}
+        <AdminStationConsolePage
           iotStatus={iotStatus}
-          form={iotConfigForm}
-          devices={devices}
-          serialLogs={serialLogs}
           stationRequests={stationRequests}
-          loading={loading}
-          onFieldChange={onIotConfigFieldChange}
-          onSubmit={onIotConfigSubmit}
         />
       );
     }
@@ -1936,174 +1932,29 @@ function AdminDeviceEventsPage({ events, devices }) {
   );
 }
 
-function AdminSerialBridgePage({ iotConfig, iotStatus, form, devices = [], serialLogs = [], stationRequests = [], loading, onFieldChange, onSubmit }) {
-  const serial = iotStatus?.serial || iotConfig?.serial || {};
-  const mqtt = iotStatus?.mqtt || iotConfig?.mqtt || {};
-  const lastReading = iotStatus?.last_reading || null;
-  const lastTemperature = lastReading?.temperature_c ?? lastReading?.temperature;
-  const linkedDevice = devices.find((device) => String(device.id) === String(form.linked_device_id)) || iotConfig?.linked_device || null;
-  const selectableDevices = devices.filter((device) => device.status !== "blocked");
+function AdminStationConsolePage({ iotStatus, stationRequests = [] }) {
+  const mqtt = iotStatus?.mqtt || {};
+  const acceptedCount = stationRequests.filter((request) => request.accepted).length;
+  const errorCount = stationRequests.length - acceptedCount;
+  const latestRequest = stationRequests[0] || null;
 
   return (
     <div className="admin-page-grid">
-      <AdminTableCard title="Serial Bridge" icon={<Radio size={20} />}>
+      <AdminTableCard title="Консоль станций" icon={<Terminal size={20} />}>
         <div className="detail-grid serial-status-grid">
-          <Metric icon={<Settings size={18} />} label="Режим подключения" value={statusLabel(iotStatus?.connection_mode || iotConfig?.connection_mode || form.connection_mode)} />
-          <Metric icon={<Cpu size={18} />} label="Устройство" value={linkedDevice ? `${linkedDevice.device_code || linkedDevice.name || linkedDevice.station_id} (${linkedDevice.city})` : "не выбрано"} />
-          <Metric icon={<MapPin size={18} />} label="Город станции" value={linkedDevice?.city || "не выбран"} />
-          <Metric icon={<Radio size={18} />} label="Station ID" value={linkedDevice?.station_id || "не выбран"} />
-          <Metric icon={<Activity size={18} />} label="Статус станции" value={statusLabel(iotStatus?.status || "unknown")} />
-          <Metric icon={<Radio size={18} />} label="Статус serial" value={statusLabel(serial.status || "unknown")} />
-          <Metric icon={<Cpu size={18} />} label="Порт" value={serial.port || form.serial_port || "не выбран"} />
-          <Metric icon={<Activity size={18} />} label="Baud rate" value={serial.baud_rate || form.baud_rate || 9600} />
-          <Metric icon={<RefreshCw size={18} />} label="Последний сигнал" value={formatDate(serial.last_seen || iotStatus?.last_seen)} />
-          <Metric icon={<Thermometer size={18} />} label="Температура" value={lastTemperature !== null && lastTemperature !== undefined ? `${formatNumber(lastTemperature)} °C` : "нет данных"} />
-          <Metric icon={<Droplets size={18} />} label="Влажность" value={lastReading?.humidity !== null && lastReading?.humidity !== undefined ? `${formatNumber(lastReading.humidity, 0)}%` : "нет данных"} />
-          <Metric icon={<FileText size={18} />} label="Последняя ошибка" value={serial.last_error || "нет"} />
+          <Metric icon={<Activity size={18} />} label="Всего записей" value={stationRequests.length} />
+          <Metric icon={<CheckCircle2 size={18} />} label="Успешно" value={acceptedCount} />
+          <Metric icon={<ShieldCheck size={18} />} label="С ошибкой" value={errorCount} />
+          <Metric icon={<RefreshCw size={18} />} label="Последний запрос" value={formatDate(latestRequest?.created_at)} />
+          <Metric icon={<Radio size={18} />} label="MQTT" value={statusLabel(mqtt.broker_status || mqtt.status || "unknown")} />
+          <Metric icon={<Waves size={18} />} label="Последнее MQTT-сообщение" value={formatDate(mqtt.last_seen)} />
         </div>
+        <p className="empty-state console-note">
+          Здесь отображаются входящие сообщения от физических станций: HTTP и MQTT. USB-подключение к серверу не требуется.
+        </p>
       </AdminTableCard>
 
-      <AdminTableCard title="Настройки подключения" icon={<Settings size={20} />}>
-        <form className="dwd-form compact-form serial-config-form" onSubmit={onSubmit}>
-          <label>
-            <span>Connection mode</span>
-            <select value={form.connection_mode} onChange={(event) => onFieldChange("connection_mode", event.target.value)}>
-              <option value="wifi_esp01">ESP-01 Wi-Fi</option>
-              <option value="serial_bridge">Serial Bridge</option>
-              <option value="ethernet_shield">Ethernet Shield</option>
-              <option value="mqtt">MQTT</option>
-            </select>
-          </label>
-          <label>
-            <span>DWD device</span>
-            <select value={form.linked_device_id} onChange={(event) => onFieldChange("linked_device_id", event.target.value)}>
-              <option value="">Не привязывать</option>
-              {selectableDevices.map((device) => (
-                <option key={device.id} value={device.id}>
-                  {device.device_code || device.station_id} — {device.city} — {device.station_id}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>Serial port</span>
-            <input
-              value={form.serial_port}
-              onChange={(event) => onFieldChange("serial_port", event.target.value)}
-              placeholder="COM3 или /dev/ttyUSB0"
-            />
-          </label>
-          <label>
-            <span>Baud rate</span>
-            <select value={form.baud_rate} onChange={(event) => onFieldChange("baud_rate", Number(event.target.value))}>
-              <option value={9600}>9600</option>
-              <option value={19200}>19200</option>
-              <option value={38400}>38400</option>
-              <option value={57600}>57600</option>
-              <option value={115200}>115200</option>
-            </select>
-          </label>
-          <label className="checkbox-row serial-enabled-row">
-            <input
-              type="checkbox"
-              checked={form.enabled}
-              onChange={(event) => onFieldChange("enabled", event.target.checked)}
-            />
-            <span>Включить Serial Bridge reader</span>
-          </label>
-          <div className="wide-field serial-help">
-            Arduino должен отправлять JSON-строки вида <code>{'{"temperature":23.5,"humidity":48,"source":"serial_bridge"}'}</code>. Ошибки DHT11 вида <code>{'{"error":"dht_read_failed"}'}</code> будут залогированы и пропущены.
-          </div>
-          <div className="wide-field serial-help">
-            После сохранения настроек запустите на машине с Arduino: <code>python manage.py run_serial_bridge</code>
-          </div>
-          {linkedDevice && (
-            <div className="wide-field serial-help">
-              Serial Bridge привязан к устройству <strong>{linkedDevice.device_code || linkedDevice.name || linkedDevice.station_id}</strong> ({linkedDevice.city}). Если Arduino передаёт <code>station_id</code>, он должен совпадать с <code>{linkedDevice.station_id}</code>.
-            </div>
-          )}
-          <button className="primary-button" type="submit" disabled={loading}>
-            Сохранить настройки
-          </button>
-        </form>
-      </AdminTableCard>
-
-      <AdminTableCard title="MQTT" icon={<Waves size={20} />}>
-        <div className="detail-grid serial-status-grid">
-          <Metric icon={<Activity size={18} />} label="Broker status" value={statusLabel(mqtt.broker_status || mqtt.status || "unknown")} />
-          <Metric icon={<Cpu size={18} />} label="Broker" value={`${mqtt.host || form.mqtt_host}:${mqtt.port || form.mqtt_port || 1883}`} />
-          <Metric icon={<Radio size={18} />} label="Topic" value={mqtt.topic || form.mqtt_topic || "weather/station"} />
-          <Metric icon={<RefreshCw size={18} />} label="Last message" value={formatDate(mqtt.last_seen)} />
-          <Metric icon={<FileText size={18} />} label="Last error" value={mqtt.last_error || "none"} />
-          <Metric icon={<ShieldCheck size={18} />} label="Auth" value={mqtt.username ? `user: ${mqtt.username}` : "anonymous"} />
-        </div>
-
-        <form className="dwd-form compact-form serial-config-form" onSubmit={onSubmit}>
-          <label className="checkbox-row serial-enabled-row">
-            <input
-              type="checkbox"
-              checked={form.mqtt_enabled}
-              onChange={(event) => onFieldChange("mqtt_enabled", event.target.checked)}
-            />
-            <span>Enable MQTT listener</span>
-          </label>
-          <label>
-            <span>MQTT host</span>
-            <input
-              value={form.mqtt_host}
-              onChange={(event) => onFieldChange("mqtt_host", event.target.value)}
-              placeholder="127.0.0.1"
-            />
-          </label>
-          <label>
-            <span>MQTT port</span>
-            <input
-              type="number"
-              min="1"
-              max="65535"
-              value={form.mqtt_port}
-              onChange={(event) => onFieldChange("mqtt_port", Number(event.target.value))}
-            />
-          </label>
-          <label className="wide-field">
-            <span>MQTT topic</span>
-            <input
-              value={form.mqtt_topic}
-              onChange={(event) => onFieldChange("mqtt_topic", event.target.value)}
-              placeholder="weather/station or darkweather/stations/+/readings"
-            />
-          </label>
-          <label>
-            <span>MQTT username</span>
-            <input
-              value={form.mqtt_username}
-              onChange={(event) => onFieldChange("mqtt_username", event.target.value)}
-              placeholder="optional"
-            />
-          </label>
-          <label>
-            <span>MQTT password</span>
-            <input
-              type="password"
-              value={form.mqtt_password}
-              onChange={(event) => onFieldChange("mqtt_password", event.target.value)}
-              placeholder={mqtt.has_password ? "saved; leave blank to keep" : "optional"}
-            />
-          </label>
-          <div className="wide-field serial-help">
-            MQTT payload: <code>{'{"station_id":"dwd-3","temperature_c":26.1,"humidity":23}'}</code>. Start listener on the server with <code>python manage.py run_mqtt_listener</code>.
-          </div>
-          <button className="primary-button" type="submit" disabled={loading}>
-            Save MQTT settings
-          </button>
-        </form>
-      </AdminTableCard>
-
-      <AdminTableCard title="Serial terminal" icon={<Terminal size={20} />}>
-        <SerialTerminal events={serialLogs} />
-      </AdminTableCard>
-
-      <AdminTableCard title="Последние запросы станции" icon={<Activity size={20} />}>
+      <AdminTableCard title="Последние сообщения" icon={<Activity size={20} />}>
         <StationRequestsTable requests={stationRequests} />
       </AdminTableCard>
     </div>
@@ -2115,7 +1966,7 @@ function StationRequestsTable({ requests = [] }) {
     return (
       <div className="serial-terminal-empty">
         <Activity size={20} />
-        <span>Пока нет POST-запросов от Arduino. Проверьте `X-Station-Key` и отправьте измерение на `/api/station/readings`.</span>
+        <span>Пока нет сообщений от станций. Когда устройство отправит HTTP или MQTT-измерение, оно появится здесь.</span>
       </div>
     );
   }
@@ -2123,57 +1974,53 @@ function StationRequestsTable({ requests = [] }) {
   return (
     <div className="admin-table admin-table-station-requests">
       <div className="admin-row admin-row-head">
-        <span>Время</span><span>Station ID</span><span>Статус</span><span>IP</span><span>Latency</span><span>Payload</span><span>Ошибка</span>
+        <span>Время</span><span>Станция</span><span>Город</span><span>Канал</span><span>Статус</span><span>IP</span><span>Запрос</span><span>Ошибка</span>
       </div>
-      {requests.map((request) => (
-        <div className="admin-row" key={request.id}>
-          <span>{formatDate(request.created_at)}</span>
-          <span>{request.station_id}</span>
-          <span><StatusPill value={request.accepted ? "online" : "error"} /></span>
-          <span>{request.request_ip || "—"}</span>
-          <span>{request.request_latency_ms ?? "—"} ms</span>
-          <span><code>{JSON.stringify(request.raw_payload || {})}</code></span>
-          <span>{request.error || "—"}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function SerialTerminal({ events }) {
-  if (!events.length) {
-    return (
-      <div className="serial-terminal-empty">
-        <Terminal size={20} />
-        <span>Пока нет serial-событий. Запустите reader и отправьте строку из Arduino.</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="serial-terminal" role="log" aria-label="Serial Bridge events">
-      {events.map((event, index) => {
-        const payload = event.payload || {};
-        const raw = payload.raw_line || "";
-        const normalized = payload.normalized_temperature ?? payload.temperature ?? "";
-        const humidity = payload.raw_humidity ?? payload.humidity ?? "";
+      {requests.map((request) => {
+        const stationName = request.station?.name || request.station_name || request.station_id || "—";
+        const city = request.station?.city || request.city || "—";
+        const source = request.source || request.raw_payload?.source || request.raw_payload?.payload?.source || "http";
+        const requestSummary = formatStationRequestSummary(request);
         return (
-          <div className={`terminal-line terminal-${String(event.level || "INFO").toLowerCase()}`} key={`${event.timestamp}-${event.event}-${index}`}>
-            <span className="terminal-time">{formatDate(event.timestamp)}</span>
-            <span className="terminal-level">{event.level}</span>
-            <span className="terminal-event">{event.event}</span>
-            <span className="terminal-message">{event.message}</span>
-            {raw && <code>{raw}</code>}
-            {(normalized !== "" || humidity !== "") && (
-              <span className="terminal-values">
-                temp={normalized || "—"} humidity={humidity || "—"} station={payload.station_id || "—"}
-              </span>
-            )}
+          <div className="admin-row" key={request.id}>
+            <span>{formatDate(request.created_at)}</span>
+            <span>
+              <strong>{stationName}</strong>
+              <small>{request.station_id}</small>
+            </span>
+            <span>{city}</span>
+            <span>{statusLabel(source)}</span>
+            <span><StatusPill value={request.accepted ? "online" : "error"} /></span>
+            <span>
+              {request.request_ip || "—"}
+              {request.request_latency_ms !== null && request.request_latency_ms !== undefined && (
+                <small>{request.request_latency_ms} ms</small>
+              )}
+            </span>
+            <span><code>{requestSummary}</code></span>
+            <span>{request.error || "—"}</span>
           </div>
         );
       })}
     </div>
   );
+}
+
+function formatStationRequestSummary(request) {
+  const temperature = request.temperature_c ?? request.raw_payload?.temperature_c ?? request.raw_payload?.payload?.temperature_c;
+  const humidity = request.humidity ?? request.raw_payload?.humidity ?? request.raw_payload?.payload?.humidity;
+  const parts = [];
+  if (temperature !== null && temperature !== undefined) {
+    parts.push(`temp=${formatNumber(temperature)}°C`);
+  }
+  if (humidity !== null && humidity !== undefined) {
+    parts.push(`humidity=${formatNumber(humidity, 0)}%`);
+  }
+  if (request.status_code) {
+    parts.push(`status=${request.status_code}`);
+  }
+  if (parts.length) return parts.join("; ");
+  return JSON.stringify(request.raw_payload || {});
 }
 
 function AdminInstructionsPage({
@@ -2857,10 +2704,9 @@ function ExtendedForecastSection({ isAuthenticated, open, data, loading, onToggl
     <section className="extended-section glass-panel reveal is-visible">
       <div className="section-heading">
         <div>
-          <span className="eyebrow">Visual Crossing</span>
+          <span className="eyebrow">На ближайшие дни</span>
           <h2>Подробный прогноз</h2>
         </div>
-        {isAuthenticated && data?.cached && <span className="cache-pill">Данные загружены из кэша</span>}
       </div>
 
       {!isAuthenticated ? (
@@ -3006,35 +2852,31 @@ function WeatherCard({ weather }) {
     <article className="weather-card glass-panel reveal">
       <div className="panel-title">
         <Thermometer size={20} />
-        <h2>Погода из API</h2>
+        <h2>Погода сейчас</h2>
       </div>
-      <div className="temperature-display">{formatNumber(weather?.temperature_c)}<span>C</span></div>
+      <div className="temperature-display">{formatNumber(weather?.temperature_c)}<span>°C</span></div>
       <div className="metric-list">
         <Metric icon={<Waves size={18} />} label="Давление" value={`${formatNumber(weather?.pressure_hpa, 0)} hPa`} />
         <Metric icon={<Wind size={18} />} label="Ветер" value={`${formatNumber(weather?.wind_speed_ms)} m/s`} />
         <Metric icon={<Droplets size={18} />} label="Осадки" value={`${formatNumber(weather?.precipitation_mm)} mm`} />
-        <Metric icon={<MapPin size={18} />} label="Источник" value={weather?.source || "—"} />
       </div>
       <footer className="card-footer">
-        <span>{formatDate(weather?.observed_at)}</span>
-        <span className="cache-pill">{weather?.cache_status || "готово"}</span>
+        <span>{weather?.observed_at ? `Обновлено ${formatDate(weather.observed_at)}` : "Введите город, чтобы узнать погоду"}</span>
       </footer>
     </article>
   );
 }
 
 function OutfitCard({ outfit }) {
+  const recommendation = cleanRecommendationText(outfit?.recommendation);
+
   return (
     <article className="outfit-card glass-panel reveal">
       <div className="panel-title">
         <Sparkles size={20} />
-        <h2>AI-рекомендация</h2>
+        <h2>Совет по одежде</h2>
       </div>
-      <p>{outfit?.recommendation || "Рекомендация появится после первого погодного запроса."}</p>
-      <footer className="card-footer">
-        <span>{outfit?.model || "openrouter/free"}</span>
-        <span className="cache-pill">{outfit?.source || "ожидание"}</span>
-      </footer>
+      <p>{recommendation || "Рекомендация появится после первого погодного запроса."}</p>
     </article>
   );
 }
@@ -3060,20 +2902,23 @@ function StationLatest({ reading }) {
   const payload = reading.reading || reading;
   const temperature = payload.temperature_c ?? payload.temperature;
   const items = [
-    ["Температура", `${formatNumber(temperature)} C`, <Thermometer size={18} />],
+    ["Температура", `${formatNumber(temperature)} °C`, <Thermometer size={18} />],
     ["Влажность", `${formatNumber(payload?.humidity, 0)}%`, <Droplets size={18} />],
-    ["Давление", `${formatNumber(payload?.pressure_hpa, 0)} hPa`, <Waves size={18} />],
-    ["Ветер", `${formatNumber(payload?.wind_speed_ms)} m/s`, <Wind size={18} />],
   ];
+  if (payload?.pressure_hpa !== null && payload?.pressure_hpa !== undefined) {
+    items.push(["Давление", `${formatNumber(payload.pressure_hpa, 0)} hPa`, <Waves size={18} />]);
+  }
+  if (payload?.wind_speed_ms !== null && payload?.wind_speed_ms !== undefined) {
+    items.push(["Ветер", `${formatNumber(payload.wind_speed_ms)} m/s`, <Wind size={18} />]);
+  }
 
   return (
     <div className="station-latest">
       {items.map(([label, value, icon]) => (
         <Metric key={label} icon={icon} label={label} value={value} />
       ))}
-      <Metric icon={<Cpu size={18} />} label="Станция" value={station ? `${station.name} / ${station.city}` : payload?.station_id || "—"} />
-      <Metric icon={<RefreshCw size={18} />} label="Замер" value={formatDate(payload?.created_at || payload?.observed_at)} />
-      <Metric icon={<Activity size={18} />} label="Источник" value={payload?.source || payload?.data_source || "—"} />
+      <Metric icon={<Cpu size={18} />} label="Станция" value={station ? `${station.name || station.station_id} · ${station.city}` : "Локальное устройство"} />
+      <Metric icon={<RefreshCw size={18} />} label="Обновлено" value={formatDate(payload?.created_at || payload?.observed_at)} />
     </div>
   );
 }

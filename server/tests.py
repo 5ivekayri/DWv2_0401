@@ -346,6 +346,14 @@ class WeatherApiTests(TestCase):
         self.assertEqual(request_log.error, "invalid station key")
 
     def test_station_requests_endpoint_returns_recent_admin_logs(self):
+        owner = get_user_model().objects.create_user(username="station-owner", password="password123")
+        DWDDevice.objects.create(
+            owner=owner,
+            device_code="DWD Test Station",
+            station_id="arduino-test",
+            city="Саранск",
+            status=DWDDevice.STATUS_ACTIVE,
+        )
         self.client.post(
             "/api/station/readings",
             {"station_id": "arduino-test", "temperature_c": 27.1, "humidity": 20},
@@ -361,6 +369,9 @@ class WeatherApiTests(TestCase):
         self.assertEqual(len(response.data["results"]), 1)
         self.assertTrue(response.data["results"][0]["accepted"])
         self.assertEqual(response.data["results"][0]["raw_payload"]["temperature_c"], 27.1)
+        self.assertEqual(response.data["results"][0]["station_name"], "DWD Test Station")
+        self.assertEqual(response.data["results"][0]["city"], "Саранск")
+        self.assertEqual(response.data["results"][0]["temperature_c"], 27.1)
 
     def test_station_ingest_links_device_by_device_code_alias_and_accepts_r4_wifi_source(self):
         owner = get_user_model().objects.create_user(username="r4-owner", password="password123")
@@ -460,6 +471,10 @@ class WeatherApiTests(TestCase):
         self.assertEqual(reading.humidity, 23)
         self.assertEqual(device.ip_address, "192.168.0.25")
         self.assertEqual(config.mqtt_status, IoTConfiguration.MQTT_STATUS_CONNECTED)
+        request_log = StationRequestLog.objects.get(station_id="dwd-3")
+        self.assertTrue(request_log.accepted)
+        self.assertEqual(request_log.reading_id, reading.id)
+        self.assertEqual(request_log.raw_payload["source"], WeatherStationReading.SOURCE_MQTT)
 
     def test_mqtt_bridge_requires_valid_payload_without_crashing(self):
         config = get_iot_config()
@@ -470,6 +485,7 @@ class WeatherApiTests(TestCase):
 
         self.assertIsNone(reading)
         self.assertFalse(WeatherStationReading.objects.exists())
+        self.assertFalse(StationRequestLog.objects.get().accepted)
         self.assertTrue(SystemEvent.objects.filter(event="mqtt_parse_failed").exists())
 
     def test_mqtt_topic_can_supply_station_id(self):

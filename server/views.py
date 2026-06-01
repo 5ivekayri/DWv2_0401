@@ -969,10 +969,22 @@ def _request_latency_ms(started_at: float) -> float:
 
 
 def _station_request_to_payload(obj: StationRequestLog) -> dict:
+    reading = obj.reading
+    device = reading.device if reading and reading.device_id else find_device_by_station_id(obj.station_id)
+    reading_source = reading.source if reading else str(obj.raw_payload.get("source") or obj.raw_payload.get("channel") or "")
+    if not reading_source and isinstance(obj.raw_payload.get("payload"), dict):
+        reading_source = str(obj.raw_payload["payload"].get("source") or "")
+
     return {
         "id": obj.id,
         "station_id": obj.station_id,
         "reading_id": obj.reading_id,
+        "station": device_station_payload(device) if device else None,
+        "station_name": device.device_code or device.station_id if device else obj.station_id,
+        "city": device.city if device else "",
+        "source": reading_source,
+        "temperature_c": reading.temperature_c if reading else obj.raw_payload.get("temperature_c"),
+        "humidity": reading.humidity if reading else obj.raw_payload.get("humidity"),
         "request_ip": obj.request_ip,
         "request_latency_ms": obj.request_latency_ms,
         "status_code": obj.status_code,
@@ -1180,7 +1192,7 @@ class StationRequestsView(APIView):
             )
 
         station_id = str(request.query_params.get("station_id", "")).strip()
-        requests = StationRequestLog.objects.select_related("reading").all()
+        requests = StationRequestLog.objects.select_related("reading", "reading__device", "reading__device__owner").all()
         if station_id:
             requests = requests.filter(station_id=station_id)
 

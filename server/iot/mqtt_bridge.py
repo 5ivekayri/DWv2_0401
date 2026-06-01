@@ -13,7 +13,7 @@ from django.utils.dateparse import parse_datetime
 
 from server.iot.config import get_iot_config
 from server.iot.devices import find_device_by_station_id, record_device_reading
-from server.models import IoTConfiguration, SystemEvent, WeatherStationReading
+from server.models import IoTConfiguration, StationRequestLog, SystemEvent, WeatherStationReading
 from server.monitoring import record_system_event
 from server.weather.storage import store_station_reading_snapshot
 
@@ -76,12 +76,31 @@ class MqttArduinoListener:
         self.config = config or get_iot_config()
 
     def save_message(self, topic: str, payload: str | bytes, *, remote_ip: str = "") -> WeatherStationReading | None:
+        started_at = time.perf_counter()
         try:
             parsed = parse_mqtt_message(topic, payload)
         except MqttBridgeIgnoredMessage as exc:
+            self._record_request_log(
+                topic=topic,
+                payload=payload,
+                remote_ip=remote_ip,
+                accepted=False,
+                status_code=400,
+                error=str(exc),
+                started_at=started_at,
+            )
             self._mark_error(event="mqtt_parse_failed", message=str(exc), topic=topic, payload=payload, mark_status=False)
             return None
         except Exception as exc:
+            self._record_request_log(
+                topic=topic,
+                payload=payload,
+                remote_ip=remote_ip,
+                accepted=False,
+                status_code=400,
+                error=str(exc),
+                started_at=started_at,
+            )
             self._mark_error(event="mqtt_parse_failed", message=str(exc), topic=topic, payload=payload, mark_status=False)
             return None
 
@@ -110,8 +129,30 @@ class MqttArduinoListener:
             record_device_reading(reading, ip_address=remote_ip)
             store_station_reading_snapshot(reading)
         except Exception as exc:
+            self._record_request_log(
+                topic=topic,
+                payload=payload,
+                remote_ip=remote_ip,
+                accepted=False,
+                status_code=500,
+                error=str(exc),
+                started_at=started_at,
+                station_id=parsed.station_id,
+            )
             self._mark_error(event="mqtt_save_failed", message=str(exc), topic=topic, payload=payload)
             return None
+
+        self._record_request_log(
+            topic=topic,
+            payload=parsed.raw_data,
+            remote_ip=remote_ip,
+            accepted=True,
+            status_code=202,
+            error="",
+            started_at=started_at,
+            station_id=parsed.station_id,
+            reading=reading,
+        )
 
         now = timezone.now()
         self.config.mqtt_status = (
@@ -145,6 +186,41 @@ class MqttArduinoListener:
             parsed.humidity,
         )
         return reading
+
+    def _record_request_log(
+        self,
+        *,
+        topic: str,
+        payload: str | bytes | dict[str, Any],
+        remote_ip: str,
+        accepted: bool,
+        status_code: int,
+        error: str,
+        started_at: float,
+        station_id: str | None = None,
+        reading: WeatherStationReading | None = None,
+    ) -> None:
+        try:
+            if isinstance(payload, bytes):
+                payload_value: Any = payload.decode("utf-8", errors="replace")
+            else:
+                payload_value = payload
+            StationRequestLog.objects.create(
+                station_id=station_id or _station_id_from_topic(topic) or "unknown",
+                reading=reading,
+                request_ip=remote_ip,
+                request_latency_ms=round((time.perf_counter() - started_at) * 1000, 2),
+                status_code=status_code,
+                accepted=accepted,
+                error=error,
+                raw_payload={
+                    "source": WeatherStationReading.SOURCE_MQTT,
+                    "topic": topic,
+                    "payload": payload_value,
+                },
+            )
+        except Exception:
+            log.exception("mqtt_station_request_log_failed topic=%s accepted=%s", topic, accepted)
 
     def run_forever(self) -> None:
         try:
