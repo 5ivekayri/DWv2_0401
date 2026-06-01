@@ -39,6 +39,7 @@ import {
   clearTokens,
   createDwdProvisioning,
   createProviderApplication,
+  createSupportTicket,
   deleteAdminDwdUser,
   deleteProfile,
   geocodeCity,
@@ -55,6 +56,8 @@ import {
   listDwdApplicationMessages,
   listDwdNotifications,
   listStationRequests,
+  listSupportTicketMessages,
+  listSupportTickets,
   listProviderApplications,
   login,
   markDwdProvisioningSent,
@@ -64,6 +67,7 @@ import {
   runAdminDwdDeviceAction,
   saveTokens,
   sendDwdApplicationMessage,
+  sendSupportTicketMessage,
   signup,
   startTelegram2FASetup,
   updateTelegram2FASettings,
@@ -72,6 +76,7 @@ import {
   updateAdminIotConfig,
   updateAdminDwdUserRole,
   updateProfile,
+  updateSupportTicket,
   verifyTelegram2FASetup,
   verifyTelegramLogin,
 } from "./api";
@@ -87,6 +92,7 @@ const DEBUG_UI = import.meta.env.DEV || localStorage.getItem("dwv2_debug_ui") ==
 const DEFAULT_DWD_FORM = { city: "", email: "", comment: "" };
 const DEFAULT_PROFILE_FORM = { username: "", email: "" };
 const DEFAULT_PASSWORD_FORM = { current_password: "", new_password: "" };
+const DEFAULT_SUPPORT_FORM = { subject: "", category: "service", message: "" };
 const DEFAULT_TELEGRAM_2FA_FORM = {
   telegram_username: "",
   code: "",
@@ -111,7 +117,7 @@ const DEFAULT_PROVISIONING_FORM = {
   device_id: "",
   firmware_type: "esp01_wifi",
   firmware_version: "1.0.0",
-  instruction_text: FIRMWARE_TEMPLATES.esp01_wifi,
+  instruction_text: "",
   wifi_ssid: "",
   wifi_password: "",
   delivery_channel: "email",
@@ -253,6 +259,13 @@ function App() {
   const [dwdNotifications, setDwdNotifications] = useState([]);
   const [dwdMessages, setDwdMessages] = useState({});
   const [chatDrafts, setChatDrafts] = useState({});
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [supportWidgetOpen, setSupportWidgetOpen] = useState(false);
+  const [supportTickets, setSupportTickets] = useState([]);
+  const [supportMessages, setSupportMessages] = useState({});
+  const [supportDrafts, setSupportDrafts] = useState({});
+  const [supportForm, setSupportForm] = useState(DEFAULT_SUPPORT_FORM);
+  const [selectedSupportTicketId, setSelectedSupportTicketId] = useState("");
   const [adminDwdUsers, setAdminDwdUsers] = useState([]);
   const [adminDwdApplications, setAdminDwdApplications] = useState([]);
   const [adminDwdDevices, setAdminDwdDevices] = useState([]);
@@ -295,6 +308,13 @@ function App() {
       setDwdNotifications([]);
       setDwdMessages({});
       setChatDrafts({});
+      setSupportTickets([]);
+      setSupportMessages({});
+      setSupportDrafts({});
+      setSupportForm(DEFAULT_SUPPORT_FORM);
+      setSelectedSupportTicketId("");
+      setNotificationsOpen(false);
+      setSupportWidgetOpen(false);
       setAdminDwdUsers([]);
       setAdminDwdApplications([]);
       setAdminDwdDevices([]);
@@ -364,6 +384,7 @@ function App() {
     dwdApplications.length,
     providerDashboard,
     dwdNotifications.length,
+    supportTickets.length,
     adminDwdUsers.length,
     adminDwdApplications.length,
     adminDwdDevices.length,
@@ -743,6 +764,12 @@ function App() {
     const messageApplications = Array.isArray(ownApplications) ? [...ownApplications] : [];
     const notifications = await listDwdNotifications(nextTokens, { limit: 50 });
     setDwdNotifications(Array.isArray(notifications) ? notifications : []);
+    const tickets = await listSupportTickets(nextTokens, { limit: 50 });
+    const ticketList = Array.isArray(tickets) ? tickets : [];
+    setSupportTickets(ticketList);
+    if (!selectedSupportTicketId && ticketList[0]?.id) {
+      setSelectedSupportTicketId(String(ticketList[0].id));
+    }
     try {
       setProviderDashboard(await getProviderDashboard(nextTokens));
     } catch (error) {
@@ -785,6 +812,7 @@ function App() {
         setIotConfigForm(DEFAULT_IOT_CONFIG_FORM);
         setIsDwdAdmin(false);
         await refreshDwdMessages(messageApplications, nextTokens);
+        await refreshSupportMessages(ticketList, nextTokens);
         return;
       }
       if (error.status === 401) {
@@ -794,6 +822,7 @@ function App() {
       throw error;
     }
     await refreshDwdMessages(messageApplications, nextTokens);
+    await refreshSupportMessages(ticketList, nextTokens);
   }
 
   async function refreshDwdMessages(applications, nextTokens = tokens) {
@@ -809,6 +838,21 @@ function App() {
       }
     }));
     setDwdMessages((current) => ({ ...current, ...Object.fromEntries(entries) }));
+  }
+
+  async function refreshSupportMessages(tickets, nextTokens = tokens) {
+    const ids = [...new Set((tickets || []).map((item) => item?.id).filter(Boolean))];
+    if (!ids.length || !nextTokens?.access) return;
+    const entries = await Promise.all(ids.map(async (id) => {
+      try {
+        const messages = await listSupportTicketMessages(id, nextTokens);
+        return [id, Array.isArray(messages) ? messages : []];
+      } catch (error) {
+        if (error.status === 403 || error.status === 404) return [id, []];
+        throw error;
+      }
+    }));
+    setSupportMessages((current) => ({ ...current, ...Object.fromEntries(entries) }));
   }
 
   async function loadDwd(nextTokens = tokens) {
@@ -906,6 +950,50 @@ function App() {
     });
   }
 
+  async function handleSupportTicketCreate(event) {
+    event.preventDefault();
+    const subject = supportForm.subject.trim();
+    const message = supportForm.message.trim();
+    if (!subject || !message) {
+      setNotice("Укажите тему и описание обращения.");
+      return;
+    }
+    await runTask("dwd", async () => {
+      const ticket = await createSupportTicket({
+        subject,
+        message,
+        category: supportForm.category || "service",
+      }, tokens);
+      setSupportForm(DEFAULT_SUPPORT_FORM);
+      setSelectedSupportTicketId(String(ticket.id));
+      await refreshDwdData(tokens);
+      setNotice("Обращение в техподдержку создано.");
+    });
+  }
+
+  async function handleSupportTicketMessageSubmit(ticketId) {
+    const draft = (supportDrafts[ticketId] || "").trim();
+    if (!draft) return;
+    await runTask("dwd", async () => {
+      await sendSupportTicketMessage(ticketId, draft, tokens);
+      setSupportDrafts((current) => ({ ...current, [ticketId]: "" }));
+      const messages = await listSupportTicketMessages(ticketId, tokens);
+      setSupportMessages((current) => ({ ...current, [ticketId]: Array.isArray(messages) ? messages : [] }));
+      const tickets = await listSupportTickets(tokens, { limit: 50 });
+      setSupportTickets(Array.isArray(tickets) ? tickets : []);
+      const notifications = await listDwdNotifications(tokens, { limit: 50 });
+      setDwdNotifications(Array.isArray(notifications) ? notifications : []);
+    });
+  }
+
+  async function handleSupportTicketStatus(ticketId, status) {
+    await runTask("dwd", async () => {
+      await updateSupportTicket(ticketId, { status }, tokens);
+      await refreshDwdData(tokens);
+      setNotice("Статус тикета обновлён.");
+    });
+  }
+
   async function handleDevicePatch(deviceId, payload) {
     await runTask("dwd", async () => {
       await updateAdminDwdDevice(deviceId, payload, tokens);
@@ -937,12 +1025,10 @@ function App() {
   function handleProvisioningField(field, value) {
     setProvisioningForm((current) => {
       if (field !== "firmware_type") return { ...current, [field]: value };
-      const shouldReplaceTemplate =
-        !current.instruction_text || current.instruction_text === FIRMWARE_TEMPLATES[current.firmware_type];
       return {
         ...current,
         firmware_type: value,
-        instruction_text: shouldReplaceTemplate ? FIRMWARE_TEMPLATES[value] : current.instruction_text,
+        instruction_text: current.instruction_text,
       };
     });
   }
@@ -1051,10 +1137,26 @@ function App() {
           </button>
           {isAuthenticated && (
             <>
-              <button className="icon-button notification-button" onClick={() => navigate(profile?.is_staff || profile?.is_superuser || isDwdAdmin ? "/admin-panel/applications" : "/provider")} title="Уведомления">
+              <div className="notification-menu">
+              <button
+                className="icon-button notification-button"
+                onClick={() => setNotificationsOpen((value) => !value)}
+                title="Уведомления"
+                aria-label="Открыть уведомления"
+                type="button"
+              >
                 <Bell size={18} />
                 {unreadDwdCount > 0 && <span className="notification-dot">{unreadDwdCount}</span>}
               </button>
+              {notificationsOpen && (
+                <NotificationsDropdown
+                  notifications={dwdNotifications}
+                  onRead={handleNotificationRead}
+                  navigate={navigate}
+                  isAdmin={Boolean(profile?.is_staff || profile?.is_superuser || isDwdAdmin)}
+                />
+              )}
+              </div>
               <button className="icon-button" onClick={() => navigate("/profile")} title="Профиль">
                 <UserCircle size={18} />
               </button>
@@ -1074,6 +1176,26 @@ function App() {
           )}
         </div>
       </header>
+
+      <SupportWidget
+        isAuthenticated={isAuthenticated}
+        isAdmin={Boolean(profile?.is_staff || profile?.is_superuser || isDwdAdmin)}
+        open={supportWidgetOpen}
+        setOpen={setSupportWidgetOpen}
+        tickets={supportTickets}
+        selectedTicketId={selectedSupportTicketId}
+        setSelectedTicketId={setSelectedSupportTicketId}
+        messagesByTicket={supportMessages}
+        drafts={supportDrafts}
+        form={supportForm}
+        setForm={setSupportForm}
+        loading={loading.dwd}
+        onCreate={handleSupportTicketCreate}
+        onDraftChange={(ticketId, value) => setSupportDrafts((current) => ({ ...current, [ticketId]: value }))}
+        onSend={handleSupportTicketMessageSubmit}
+        onStatusChange={handleSupportTicketStatus}
+        navigate={navigate}
+      />
 
       {isAuthPage ? (
         <main className="auth-page">
@@ -1110,11 +1232,17 @@ function App() {
           notifications={dwdNotifications}
           messagesByApplication={dwdMessages}
           chatDrafts={chatDrafts}
+          supportTickets={supportTickets}
+          supportMessages={supportMessages}
+          supportDrafts={supportDrafts}
           loading={loading.dwd}
           handleDwdApplicationSubmit={handleDwdApplicationSubmit}
           onNotificationRead={handleNotificationRead}
           onChatDraftChange={(applicationId, value) => setChatDrafts((current) => ({ ...current, [applicationId]: value }))}
           onSupportMessageSubmit={handleSupportMessageSubmit}
+          onSupportDraftChange={(ticketId, value) => setSupportDrafts((current) => ({ ...current, [ticketId]: value }))}
+          onSupportTicketMessageSubmit={handleSupportTicketMessageSubmit}
+          onSupportTicketStatus={handleSupportTicketStatus}
           navigate={navigate}
         />
       ) : pathname.includes("profile") ? (
@@ -1624,6 +1752,9 @@ function AdminPanelPage({
   notifications,
   messagesByApplication,
   chatDrafts,
+  supportTickets,
+  supportMessages,
+  supportDrafts,
   loading,
   loadDwd,
   onRoleChange,
@@ -1642,6 +1773,9 @@ function AdminPanelPage({
   onNotificationRead,
   onChatDraftChange,
   onSupportMessageSubmit,
+  onSupportDraftChange,
+  onSupportTicketMessageSubmit,
+  onSupportTicketStatus,
   navigate,
 }) {
   const adminSections = [
@@ -1651,11 +1785,15 @@ function AdminPanelPage({
     ["devices", "Устройства"],
     ["events", "События устройств"],
     ["console", "Консоль"],
+    ["support", "Техподдержка"],
+    ["dwd-chat", "DWD чат"],
     ["instructions", "Инструкции"],
   ];
   const currentSection = adminSections.find(([key]) => pathname.includes(`/admin-panel/${key}`))?.[0]
     || (pathname.includes("/admin-panel/serial") ? "console" : "users");
   const selectedApplicationId = pathname.match(/\/admin-panel\/applications\/(\d+)/)?.[1];
+  const selectedDwdChatId = pathname.match(/\/admin-panel\/dwd-chat\/(\d+)/)?.[1];
+  const selectedSupportTicketId = pathname.match(/\/admin-panel\/support\/(\d+)/)?.[1];
   const selectedDeviceId = pathname.match(/\/admin-panel\/devices\/(\d+)/)?.[1];
 
   function renderSection() {
@@ -1714,6 +1852,35 @@ function AdminPanelPage({
         <AdminStationConsolePage
           iotStatus={iotStatus}
           stationRequests={stationRequests}
+        />
+      );
+    }
+    if (currentSection === "support") {
+      return (
+        <AdminSupportPage
+          tickets={supportTickets}
+          selectedTicketId={selectedSupportTicketId}
+          messagesByTicket={supportMessages}
+          drafts={supportDrafts}
+          loading={loading}
+          onDraftChange={onSupportDraftChange}
+          onSend={onSupportTicketMessageSubmit}
+          onStatusChange={onSupportTicketStatus}
+          navigate={navigate}
+        />
+      );
+    }
+    if (currentSection === "dwd-chat") {
+      return (
+        <AdminDwdChatsPage
+          applications={applications}
+          selectedApplicationId={selectedDwdChatId}
+          messagesByApplication={messagesByApplication}
+          chatDrafts={chatDrafts}
+          loading={loading}
+          onChatDraftChange={onChatDraftChange}
+          onSupportMessageSubmit={onSupportMessageSubmit}
+          navigate={navigate}
         />
       );
     }
@@ -1935,6 +2102,108 @@ function AdminProvisioningPage({ applications, loading, onApprove, onReject, nav
         ))}
       </div>
     </AdminTableCard>
+  );
+}
+
+function AdminDwdChatsPage({ applications, selectedApplicationId, messagesByApplication, chatDrafts, loading, onChatDraftChange, onSupportMessageSubmit, navigate }) {
+  const selected = applications.find((item) => String(item.id) === String(selectedApplicationId)) || applications[0] || null;
+  return (
+    <div className="admin-page-grid">
+      <AdminTableCard title="DWD чат по заявкам" icon={<MessageCircle size={20} />}>
+        <div className="admin-table admin-table-applications">
+          <div className="admin-row admin-row-head">
+            <span>ID</span><span>Пользователь</span><span>Email</span><span>Город</span><span>Статус</span><span>Последнее</span><span>Действие</span>
+          </div>
+          {applications.map((application) => {
+            const messages = messagesByApplication[application.id] || [];
+            const last = messages[messages.length - 1];
+            return (
+              <div className="admin-row" key={application.id}>
+                <span>{application.id}</span>
+                <span>{application.user?.username}</span>
+                <span>{application.email}</span>
+                <span>{application.city}</span>
+                <span><StatusPill value={application.status} /></span>
+                <span>{last ? `${last.sender?.username || "Система"}: ${last.message}` : "нет сообщений"}</span>
+                <span><button className="icon-text-button" type="button" onClick={() => navigate(`/admin-panel/dwd-chat/${application.id}`)}>Открыть чат</button></span>
+              </div>
+            );
+          })}
+        </div>
+      </AdminTableCard>
+      {selected && (
+        <SupportChat
+          application={selected}
+          messages={messagesByApplication[selected.id] || []}
+          draft={chatDrafts[selected.id] || ""}
+          loading={loading}
+          onDraftChange={onChatDraftChange}
+          onSend={onSupportMessageSubmit}
+          title={`DWD чат: ${selected.city}`}
+        />
+      )}
+    </div>
+  );
+}
+
+function AdminSupportPage({ tickets, selectedTicketId, messagesByTicket, drafts, loading, onDraftChange, onSend, onStatusChange, navigate }) {
+  const selected = tickets.find((ticket) => String(ticket.id) === String(selectedTicketId)) || tickets[0] || null;
+  return (
+    <div className="admin-page-grid">
+      <AdminTableCard title="Техническая поддержка" icon={<MessageCircle size={20} />}>
+        <div className="admin-table admin-table-support">
+          <div className="admin-row admin-row-head">
+            <span>ID</span><span>Пользователь</span><span>Тема</span><span>Категория</span><span>Статус</span><span>Обновлён</span><span>Действие</span>
+          </div>
+          {tickets.map((ticket) => (
+            <div className="admin-row" key={ticket.id}>
+              <span>{ticket.id}</span>
+              <span>{formatUser(ticket.requester)}</span>
+              <span>{ticket.subject}</span>
+              <span>{ticket.category}</span>
+              <span><StatusPill value={ticket.status} /></span>
+              <span>{formatDate(ticket.updated_at)}</span>
+              <span><button className="icon-text-button" type="button" onClick={() => navigate(`/admin-panel/support/${ticket.id}`)}>Открыть</button></span>
+            </div>
+          ))}
+        </div>
+      </AdminTableCard>
+      {selected && (
+        <article className="dwd-card support-chat">
+          <div className="panel-title"><MessageCircle size={20} /><h3>{selected.subject}</h3></div>
+          <div className="detail-grid">
+            <Metric icon={<UserCircle size={18} />} label="Пользователь" value={formatUser(selected.requester)} />
+            <Metric icon={<Activity size={18} />} label="Статус" value={statusLabel(selected.status)} />
+            <Metric icon={<FileText size={18} />} label="Категория" value={selected.category} />
+          </div>
+          <label>
+            <span>Статус тикета</span>
+            <select value={selected.status} onChange={(event) => onStatusChange(selected.id, event.target.value)}>
+              <option value="open">open</option>
+              <option value="in_progress">in_progress</option>
+              <option value="resolved">resolved</option>
+              <option value="closed">closed</option>
+            </select>
+          </label>
+          <div className="chat-thread">
+            {(messagesByTicket[selected.id] || []).map((message) => (
+              <div className={`chat-message ${message.is_system ? "is-system" : ""}`} key={message.id}>
+                <strong>{message.is_system ? "Система" : (message.sender?.username || "Пользователь")}</strong>
+                <p>{message.message}</p>
+                <small>{formatDate(message.created_at)}</small>
+              </div>
+            ))}
+          </div>
+          <form className="chat-form" onSubmit={(event) => { event.preventDefault(); onSend(selected.id); }}>
+            <input value={drafts[selected.id] || ""} onChange={(event) => onDraftChange(selected.id, event.target.value)} placeholder="Ответить пользователю" />
+            <button className="primary-button" type="submit" disabled={loading || !(drafts[selected.id] || "").trim()}>
+              <Send size={16} />
+              Отправить
+            </button>
+          </form>
+        </article>
+      )}
+    </div>
   );
 }
 
@@ -2189,7 +2458,7 @@ function AdminInstructionsPage({
   onProvisioningSent,
 }) {
   return (
-    <AdminTableCard title="Инструкции" icon={<Send size={20} />}>
+    <AdminTableCard title="Автогенерация прошивки" icon={<Send size={20} />}>
       <ProvisioningForm
         applications={applications}
         provisioningForm={provisioningForm}
@@ -2283,11 +2552,11 @@ function ProvisioningForm({ applications, provisioningForm, loading, onPreparePr
         />
       </label>
       <label className="wide-field">
-        <span>Текст инструкции</span>
-        <textarea value={provisioningForm.instruction_text} onChange={(event) => onProvisioningFieldChange("instruction_text", event.target.value)} required />
+        <span>Комментарий к выдаче <em>необязательно</em></span>
+        <textarea value={provisioningForm.instruction_text} onChange={(event) => onProvisioningFieldChange("instruction_text", event.target.value)} placeholder="Можно оставить пустым: код прошивки всё равно будет сгенерирован автоматически." />
       </label>
       <p className="empty-state wide-field">
-        После сохранения backend автоматически сгенерирует Arduino MQTT Wi-Fi код с station_id, MQTT topic и ключами устройства.
+        После сохранения backend выдаст готовый Arduino MQTT Wi-Fi код с station_id, MQTT topic и MQTT-доступом. Wi-Fi можно вписать здесь или оставить placeholders в коде.
       </p>
       <label className="wide-field">
         <span>Внутренняя заметка</span>
@@ -2295,7 +2564,7 @@ function ProvisioningForm({ applications, provisioningForm, loading, onPreparePr
       </label>
       <button className="primary-button" type="submit" disabled={loading || !provisioningForm.application_id}>
         {loading ? <RefreshCw className="spin" size={18} /> : <FileText size={18} />}
-        Сгенерировать код
+        Сгенерировать прошивку
       </button>
     </form>
   );
@@ -2400,6 +2669,15 @@ function statusLabel(value) {
     status_changed: "статус изменён",
     provisioning_ready: "прошивка готова",
     chat_message: "сообщение",
+    support_ticket: "тикет",
+    support_message: "сообщение поддержки",
+    open: "открыт",
+    in_progress: "в работе",
+    resolved: "решён",
+    closed: "закрыт",
+    low: "низкий",
+    normal: "обычный",
+    high: "высокий",
   };
   return labels[value] || value || "нет";
 }
@@ -2433,6 +2711,37 @@ function NotificationsPanel({ notifications = [], onRead }) {
         ))}
       </div>
     </article>
+  );
+}
+
+function NotificationsDropdown({ notifications = [], onRead, navigate, isAdmin }) {
+  return (
+    <div className="notifications-dropdown">
+      <div className="dropdown-title">
+        <Bell size={16} />
+        <strong>Уведомления</strong>
+      </div>
+      {notifications.length ? notifications.slice(0, 8).map((notification) => (
+        <button
+          className={`notification-row ${notification.is_read ? "" : "is-unread"}`}
+          type="button"
+          key={notification.id}
+          onClick={() => {
+            if (!notification.is_read) onRead(notification.id);
+            if (notification.support_ticket_id) {
+              navigate(isAdmin ? "/admin-panel/support" : "/provider");
+            } else if (notification.application_id) {
+              navigate(isAdmin ? `/admin-panel/applications/${notification.application_id}` : "/provider");
+            }
+          }}
+        >
+          <span>{notification.title}</span>
+          <small>{notification.message || statusLabel(notification.notification_type)}</small>
+        </button>
+      )) : (
+        <p className="empty-state">Новых уведомлений нет.</p>
+      )}
+    </div>
   );
 }
 
@@ -2473,6 +2782,122 @@ function SupportChat({ application, messages = [], draft = "", loading, onDraftC
         </button>
       </form>
     </article>
+  );
+}
+
+function SupportWidget({
+  isAuthenticated,
+  isAdmin,
+  open,
+  setOpen,
+  tickets = [],
+  selectedTicketId,
+  setSelectedTicketId,
+  messagesByTicket = {},
+  drafts = {},
+  form,
+  setForm,
+  loading,
+  onCreate,
+  onDraftChange,
+  onSend,
+  onStatusChange,
+  navigate,
+}) {
+  const selected = tickets.find((ticket) => String(ticket.id) === String(selectedTicketId)) || tickets[0] || null;
+  const messages = selected ? (messagesByTicket[selected.id] || []) : [];
+
+  return (
+    <div className={`support-widget ${open ? "is-open" : ""}`}>
+      {open && (
+        <section className="support-panel glass-panel">
+          <div className="panel-title">
+            <MessageCircle size={20} />
+            <h3>Техподдержка</h3>
+          </div>
+          {!isAuthenticated ? (
+            <div className="support-login">
+              <p>Войдите, чтобы создать обращение или ответить в тикете.</p>
+              <button className="primary-button" type="button" onClick={() => navigate("/login")}>Войти</button>
+            </div>
+          ) : (
+            <>
+              <div className="support-ticket-list">
+                {tickets.length ? tickets.map((ticket) => (
+                  <button
+                    type="button"
+                    className={String(selected?.id) === String(ticket.id) ? "active" : ""}
+                    key={ticket.id}
+                    onClick={() => setSelectedTicketId(String(ticket.id))}
+                  >
+                    <span>{ticket.subject}</span>
+                    <small>{statusLabel(ticket.status)} · {formatDate(ticket.updated_at)}</small>
+                  </button>
+                )) : (
+                  <p className="empty-state">Пока нет обращений.</p>
+                )}
+              </div>
+
+              {selected && (
+                <div className="support-chat-box">
+                  <div className="support-ticket-header">
+                    <strong>{selected.subject}</strong>
+                    <StatusPill value={selected.status} />
+                  </div>
+                  {isAdmin && (
+                    <select value={selected.status} onChange={(event) => onStatusChange(selected.id, event.target.value)}>
+                      <option value="open">open</option>
+                      <option value="in_progress">in_progress</option>
+                      <option value="resolved">resolved</option>
+                      <option value="closed">closed</option>
+                    </select>
+                  )}
+                  <div className="chat-thread compact-thread">
+                    {messages.length ? messages.map((message) => (
+                      <div className={`chat-message ${message.is_system ? "is-system" : ""}`} key={message.id}>
+                        <strong>{message.is_system ? "Система" : (message.sender?.username || "Пользователь")}</strong>
+                        <p>{message.message}</p>
+                        <small>{formatDate(message.created_at)}</small>
+                      </div>
+                    )) : <p className="empty-state">Сообщений пока нет.</p>}
+                  </div>
+                  <form className="chat-form" onSubmit={(event) => { event.preventDefault(); onSend(selected.id); }}>
+                    <input
+                      value={drafts[selected.id] || ""}
+                      onChange={(event) => onDraftChange(selected.id, event.target.value)}
+                      placeholder="Ответить в тикет"
+                    />
+                    <button className="primary-button" type="submit" disabled={loading || !(drafts[selected.id] || "").trim()}>
+                      <Send size={16} />
+                    </button>
+                  </form>
+                </div>
+              )}
+
+              {!isAdmin && (
+                <form className="support-new-ticket" onSubmit={onCreate}>
+                  <strong>Новое обращение</strong>
+                  <input value={form.subject} onChange={(event) => setForm({ ...form, subject: event.target.value })} placeholder="Тема проблемы" />
+                  <select value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })}>
+                    <option value="service">Сервис</option>
+                    <option value="weather">Погода</option>
+                    <option value="station">Станция</option>
+                    <option value="account">Аккаунт</option>
+                  </select>
+                  <textarea value={form.message} onChange={(event) => setForm({ ...form, message: event.target.value })} placeholder="Опишите проблему" />
+                  <button className="primary-button" type="submit" disabled={loading}>
+                    Создать тикет
+                  </button>
+                </form>
+              )}
+            </>
+          )}
+        </section>
+      )}
+      <button className="support-fab" type="button" onClick={() => setOpen(!open)} aria-label="Техподдержка">
+        <MessageCircle size={22} />
+      </button>
+    </div>
   );
 }
 

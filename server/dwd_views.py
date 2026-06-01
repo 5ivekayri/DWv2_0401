@@ -25,6 +25,8 @@ from server.models import (
     DWDProvisioning,
     DWDSupportMessage,
     SystemEvent,
+    SupportTicket,
+    SupportTicketMessage,
 )
 from server.monitoring import record_system_event, utc_iso
 
@@ -164,6 +166,7 @@ def notify_user(
     application: DWDProviderApplication | None = None,
     device: DWDDevice | None = None,
     provisioning: DWDProvisioning | None = None,
+    support_ticket: SupportTicket | None = None,
 ) -> DWDNotification | None:
     if recipient is None:
         return None
@@ -175,6 +178,7 @@ def notify_user(
         application=application,
         device=device,
         provisioning=provisioning,
+        support_ticket=support_ticket,
     )
 
 
@@ -186,6 +190,7 @@ def notify_admins(
     application: DWDProviderApplication | None = None,
     device: DWDDevice | None = None,
     provisioning: DWDProvisioning | None = None,
+    support_ticket: SupportTicket | None = None,
     exclude_user_id: int | None = None,
 ) -> None:
     User = get_user_model()
@@ -201,6 +206,7 @@ def notify_admins(
             application=application,
             device=device,
             provisioning=provisioning,
+            support_ticket=support_ticket,
         )
 
 
@@ -876,6 +882,7 @@ class DWDProvisioningCreateSerializer(serializers.Serializer):
 
 
 class DWDProvisioningSerializer(serializers.ModelSerializer):
+    firmware_code = serializers.SerializerMethodField()
     application_id = serializers.IntegerField(read_only=True)
     user = serializers.SerializerMethodField()
     device = serializers.SerializerMethodField()
@@ -929,6 +936,17 @@ class DWDProvisioningSerializer(serializers.ModelSerializer):
     def get_wifi_configured(self, obj):
         return bool(obj.wifi_ssid and obj.wifi_password)
 
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_firmware_code(self, obj):
+        if obj.firmware_code:
+            return obj.firmware_code
+        return generate_mqtt_wifi_firmware(
+            device=obj.device,
+            firmware_version=obj.firmware_version,
+            wifi_ssid=obj.wifi_ssid,
+            wifi_password=obj.wifi_password,
+        )
+
 
 class DWDDeviceEventSerializer(serializers.ModelSerializer):
     device_code = serializers.CharField(source="device.device_code", read_only=True)
@@ -949,6 +967,7 @@ class DWDNotificationSerializer(serializers.ModelSerializer):
     application_id = serializers.IntegerField(read_only=True)
     device_id = serializers.IntegerField(read_only=True)
     provisioning_id = serializers.IntegerField(read_only=True)
+    support_ticket_id = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = DWDNotification
@@ -960,6 +979,7 @@ class DWDNotificationSerializer(serializers.ModelSerializer):
             "application_id",
             "device_id",
             "provisioning_id",
+            "support_ticket_id",
             "is_read",
             "created_at",
         )
@@ -978,6 +998,67 @@ class DWDSupportMessageSerializer(serializers.ModelSerializer):
 
 
 class DWDSupportMessageCreateSerializer(serializers.Serializer):
+    message = serializers.CharField(allow_blank=False, trim_whitespace=True)
+
+
+class SupportTicketMessageSerializer(serializers.ModelSerializer):
+    sender = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SupportTicketMessage
+        fields = ("id", "ticket", "sender", "message", "is_system", "created_at")
+
+    @extend_schema_field(USER_SUMMARY_RESPONSE)
+    def get_sender(self, obj):
+        return user_payload(obj.sender)
+
+
+class SupportTicketSerializer(serializers.ModelSerializer):
+    requester = serializers.SerializerMethodField()
+    last_message = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SupportTicket
+        fields = (
+            "id",
+            "requester",
+            "subject",
+            "category",
+            "status",
+            "priority",
+            "last_message",
+            "created_at",
+            "updated_at",
+            "closed_at",
+        )
+
+    @extend_schema_field(USER_SUMMARY_RESPONSE)
+    def get_requester(self, obj):
+        return user_payload(obj.requester)
+
+    @extend_schema_field(OpenApiTypes.OBJECT)
+    def get_last_message(self, obj):
+        message = obj.messages.select_related("sender").order_by("-created_at", "-id").first()
+        return SupportTicketMessageSerializer(message).data if message else None
+
+
+class SupportTicketCreateSerializer(serializers.Serializer):
+    subject = serializers.CharField(max_length=180, allow_blank=False, trim_whitespace=True)
+    message = serializers.CharField(allow_blank=False, trim_whitespace=True)
+    category = serializers.CharField(max_length=80, required=False, allow_blank=True, trim_whitespace=True)
+    priority = serializers.ChoiceField(
+        choices=[choice[0] for choice in SupportTicket.PRIORITY_CHOICES],
+        required=False,
+        default=SupportTicket.PRIORITY_NORMAL,
+    )
+
+
+class SupportTicketUpdateSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=[choice[0] for choice in SupportTicket.STATUS_CHOICES], required=False)
+    priority = serializers.ChoiceField(choices=[choice[0] for choice in SupportTicket.PRIORITY_CHOICES], required=False)
+
+
+class SupportTicketMessageCreateSerializer(serializers.Serializer):
     message = serializers.CharField(allow_blank=False, trim_whitespace=True)
 
 
@@ -1126,6 +1207,167 @@ class DWDApplicationMessagesView(APIView):
                 exclude_user_id=request.user.pk,
             )
         return Response(DWDSupportMessageSerializer(message).data, status=status.HTTP_201_CREATED)
+
+
+def accessible_support_ticket_queryset(user):
+    queryset = SupportTicket.objects.select_related("requester").prefetch_related("messages", "messages__sender")
+    if user.is_staff:
+        return queryset
+    return queryset.filter(requester=user)
+
+
+class SupportTicketsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description="Technical support tickets. Admins see all tickets, users see their own tickets.",
+        responses=dwd_responses(SupportTicketSerializer(many=True)),
+    )
+    def get(self, request):
+        tickets = accessible_support_ticket_queryset(request.user)
+        status_filter = request.query_params.get("status")
+        if status_filter:
+            tickets = tickets.filter(status=status_filter)
+        try:
+            limit = min(max(int(request.query_params.get("limit", 50)), 1), 200)
+        except ValueError:
+            return Response({"detail": "limit must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(SupportTicketSerializer(tickets[:limit], many=True).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        description="Create a technical support ticket and first message.",
+        request=SupportTicketCreateSerializer,
+        responses=dwd_responses(created_schema=SupportTicketSerializer),
+    )
+    @transaction.atomic
+    def post(self, request):
+        serializer = SupportTicketCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        ticket = SupportTicket.objects.create(
+            requester=request.user,
+            subject=serializer.validated_data["subject"],
+            category=serializer.validated_data.get("category", "") or "service",
+            priority=serializer.validated_data.get("priority", SupportTicket.PRIORITY_NORMAL),
+        )
+        SupportTicketMessage.objects.create(
+            ticket=ticket,
+            sender=request.user,
+            message=serializer.validated_data["message"],
+        )
+        notify_admins(
+            notification_type=DWDNotification.TYPE_SUPPORT_TICKET,
+            title="Новый тикет техподдержки",
+            message=f"{request.user.get_username()}: {ticket.subject}",
+            support_ticket=ticket,
+            exclude_user_id=request.user.pk,
+        )
+        record_system_event(
+            event="support_ticket_created",
+            source="support",
+            message=f"Support ticket {ticket.pk} created by user {request.user.pk}",
+            payload={"ticket_id": ticket.pk, "user_id": request.user.pk, "category": ticket.category},
+        )
+        return Response(SupportTicketSerializer(ticket).data, status=status.HTTP_201_CREATED)
+
+
+class SupportTicketDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description="Get a technical support ticket.",
+        responses=dwd_responses(SupportTicketSerializer),
+    )
+    def get(self, request, pk: int):
+        ticket = get_object_or_404(accessible_support_ticket_queryset(request.user), pk=pk)
+        return Response(SupportTicketSerializer(ticket).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        description="Admin-only update of support ticket status or priority.",
+        request=SupportTicketUpdateSerializer,
+        responses=dwd_responses(SupportTicketSerializer),
+    )
+    def patch(self, request, pk: int):
+        if not request.user.is_staff:
+            return Response({"detail": "Only admin can update support ticket status."}, status=status.HTTP_403_FORBIDDEN)
+        ticket = get_object_or_404(accessible_support_ticket_queryset(request.user), pk=pk)
+        serializer = SupportTicketUpdateSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        changed_fields = []
+        for field in ("status", "priority"):
+            if field in serializer.validated_data:
+                setattr(ticket, field, serializer.validated_data[field])
+                changed_fields.append(field)
+        if "status" in changed_fields and ticket.status in {SupportTicket.STATUS_RESOLVED, SupportTicket.STATUS_CLOSED}:
+            ticket.closed_at = timezone.now()
+            changed_fields.append("closed_at")
+        if changed_fields:
+            changed_fields.append("updated_at")
+            ticket.save(update_fields=changed_fields)
+            SupportTicketMessage.objects.create(
+                ticket=ticket,
+                sender=request.user,
+                is_system=True,
+                message=f"Статус тикета изменён: {ticket.status}.",
+            )
+            notify_user(
+                ticket.requester,
+                notification_type=DWDNotification.TYPE_SUPPORT_TICKET,
+                title="Тикет техподдержки обновлён",
+                message=f"{ticket.subject}: {ticket.status}",
+                support_ticket=ticket,
+            )
+        return Response(SupportTicketSerializer(ticket).data, status=status.HTTP_200_OK)
+
+
+class SupportTicketMessagesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description="Messages inside a technical support ticket.",
+        responses=dwd_responses(SupportTicketMessageSerializer(many=True)),
+    )
+    def get(self, request, pk: int):
+        ticket = get_object_or_404(accessible_support_ticket_queryset(request.user), pk=pk)
+        return Response(SupportTicketMessageSerializer(ticket.messages.select_related("sender"), many=True).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        description="Send a message to a technical support ticket.",
+        request=SupportTicketMessageCreateSerializer,
+        responses=dwd_responses(created_schema=SupportTicketMessageSerializer),
+    )
+    def post(self, request, pk: int):
+        ticket = get_object_or_404(accessible_support_ticket_queryset(request.user), pk=pk)
+        serializer = SupportTicketMessageCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        message = SupportTicketMessage.objects.create(
+            ticket=ticket,
+            sender=request.user,
+            message=serializer.validated_data["message"],
+        )
+        ticket.updated_at = timezone.now()
+        if request.user.is_staff and ticket.status == SupportTicket.STATUS_OPEN:
+            ticket.status = SupportTicket.STATUS_IN_PROGRESS
+            ticket.save(update_fields=["status", "updated_at"])
+        else:
+            ticket.save(update_fields=["updated_at"])
+
+        if request.user.is_staff:
+            notify_user(
+                ticket.requester,
+                notification_type=DWDNotification.TYPE_SUPPORT_MESSAGE,
+                title="Ответ техподдержки",
+                message=message.message[:240],
+                support_ticket=ticket,
+            )
+        else:
+            notify_admins(
+                notification_type=DWDNotification.TYPE_SUPPORT_MESSAGE,
+                title="Новое сообщение в техподдержке",
+                message=f"{request.user.get_username()}: {message.message[:200]}",
+                support_ticket=ticket,
+                exclude_user_id=request.user.pk,
+            )
+        return Response(SupportTicketMessageSerializer(message).data, status=status.HTTP_201_CREATED)
 
 
 class AdminDWDUsersView(APIView):

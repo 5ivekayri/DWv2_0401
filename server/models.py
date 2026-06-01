@@ -562,12 +562,16 @@ class DWDNotification(models.Model):
     TYPE_STATUS_CHANGED = "status_changed"
     TYPE_PROVISIONING_READY = "provisioning_ready"
     TYPE_CHAT_MESSAGE = "chat_message"
+    TYPE_SUPPORT_TICKET = "support_ticket"
+    TYPE_SUPPORT_MESSAGE = "support_message"
 
     TYPE_CHOICES = [
         (TYPE_APPLICATION_SUBMITTED, "Application submitted"),
         (TYPE_STATUS_CHANGED, "Status changed"),
         (TYPE_PROVISIONING_READY, "Provisioning ready"),
         (TYPE_CHAT_MESSAGE, "Chat message"),
+        (TYPE_SUPPORT_TICKET, "Support ticket"),
+        (TYPE_SUPPORT_MESSAGE, "Support message"),
     ]
 
     recipient = models.ForeignKey(
@@ -591,6 +595,13 @@ class DWDNotification(models.Model):
     )
     provisioning = models.ForeignKey(
         DWDProvisioning,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="notifications",
+    )
+    support_ticket = models.ForeignKey(
+        "SupportTicket",
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -639,6 +650,77 @@ class DWDSupportMessage(models.Model):
     def __str__(self) -> str:
         sender = self.sender_id or "system"
         return f"{self.application_id} {sender} {self.created_at.isoformat()}"
+
+
+class SupportTicket(models.Model):
+    STATUS_OPEN = "open"
+    STATUS_IN_PROGRESS = "in_progress"
+    STATUS_RESOLVED = "resolved"
+    STATUS_CLOSED = "closed"
+
+    STATUS_CHOICES = [
+        (STATUS_OPEN, "Open"),
+        (STATUS_IN_PROGRESS, "In progress"),
+        (STATUS_RESOLVED, "Resolved"),
+        (STATUS_CLOSED, "Closed"),
+    ]
+
+    PRIORITY_LOW = "low"
+    PRIORITY_NORMAL = "normal"
+    PRIORITY_HIGH = "high"
+
+    PRIORITY_CHOICES = [
+        (PRIORITY_LOW, "Low"),
+        (PRIORITY_NORMAL, "Normal"),
+        (PRIORITY_HIGH, "High"),
+    ]
+
+    requester = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="support_tickets",
+    )
+    subject = models.CharField(max_length=180)
+    category = models.CharField(max_length=80, blank=True, default="service")
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_OPEN, db_index=True)
+    priority = models.CharField(max_length=32, choices=PRIORITY_CHOICES, default=PRIORITY_NORMAL, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-id"]
+        indexes = [
+            models.Index(fields=["requester", "status", "updated_at"]),
+            models.Index(fields=["status", "updated_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.pk} {self.subject} {self.status}"
+
+
+class SupportTicketMessage(models.Model):
+    ticket = models.ForeignKey(SupportTicket, on_delete=models.CASCADE, related_name="messages")
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="support_ticket_messages",
+    )
+    message = models.TextField()
+    is_system = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(fields=["ticket", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        sender = self.sender_id or "system"
+        return f"{self.ticket_id} {sender} {self.created_at.isoformat()}"
 
 
 class DWDDeviceEvent(models.Model):

@@ -435,6 +435,10 @@ a {
   grid-template-columns: 0.9fr 1.1fr 0.85fr 0.7fr 0.7fr 0.8fr 1.2fr 1fr;
 }
 
+.admin-table-support .admin-row {
+  grid-template-columns: 72px 1fr 1.5fr 0.8fr 0.8fr 0.9fr 0.8fr;
+}
+
 .admin-table-station-requests small {
   display: block;
   color: var(--soft-text);
@@ -783,6 +787,58 @@ textarea:focus {
   color: #fff;
   background: #e64646;
   box-shadow: 0 0 0 2px var(--panel-bg);
+}
+
+.notification-menu {
+  position: relative;
+}
+
+.notifications-dropdown {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 50;
+  width: min(340px, 86vw);
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 18px;
+  padding: 12px;
+  background: var(--panel-bg);
+  box-shadow: var(--panel-shadow);
+}
+
+.dropdown-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+
+.notification-row {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  border: 1px solid var(--control-border);
+  border-radius: 14px;
+  padding: 10px;
+  text-align: left;
+  color: var(--text);
+  background: var(--control-bg);
+  cursor: pointer;
+}
+
+.notification-row.is-unread {
+  border-color: rgba(6, 135, 221, 0.38);
+  background: rgba(6, 135, 221, 0.09);
+}
+
+.notification-row span {
+  font-weight: 900;
+}
+
+.notification-row small {
+  color: var(--muted);
 }
 
 .auth-chip {
@@ -1503,6 +1559,85 @@ textarea:focus {
   gap: 10px;
 }
 
+.compact-thread {
+  max-height: 220px;
+}
+
+.support-widget {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 70;
+  display: grid;
+  gap: 12px;
+  justify-items: end;
+}
+
+.support-fab {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border: 0;
+  border-radius: 18px;
+  color: white;
+  background: linear-gradient(135deg, #0687dd, #1ec8c0);
+  box-shadow: 0 18px 34px rgba(6, 135, 221, 0.28);
+  cursor: pointer;
+}
+
+.support-panel {
+  width: min(420px, calc(100vw - 28px));
+  max-height: min(720px, calc(100vh - 110px));
+  display: grid;
+  gap: 12px;
+  overflow: auto;
+  padding: 18px;
+}
+
+.support-ticket-list {
+  display: grid;
+  gap: 8px;
+  max-height: 170px;
+  overflow: auto;
+}
+
+.support-ticket-list button {
+  display: grid;
+  gap: 3px;
+  border: 1px solid var(--control-border);
+  border-radius: 14px;
+  padding: 10px;
+  text-align: left;
+  color: var(--text);
+  background: var(--control-bg);
+  cursor: pointer;
+}
+
+.support-ticket-list button.active {
+  border-color: rgba(6, 135, 221, 0.5);
+  background: rgba(6, 135, 221, 0.1);
+}
+
+.support-ticket-list small,
+.support-ticket-header + select {
+  color: var(--muted);
+}
+
+.support-chat-box,
+.support-new-ticket,
+.support-login {
+  display: grid;
+  gap: 10px;
+}
+
+.support-ticket-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .firmware-code {
   display: grid;
   gap: 8px;
@@ -1561,12 +1696,16 @@ textarea:focus {
 .status-acknowledged,
 .status-instruction_ready,
 .status-provider,
+.status-resolved,
+.status-closed,
 .status-info {
   color: #046d51;
   background: rgba(50, 213, 131, 0.18);
 }
 
 .status-pending,
+.status-open,
+.status-in_progress,
 .status-not_started,
 .status-firmware_assigned,
 .status-warning,

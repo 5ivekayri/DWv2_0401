@@ -10,6 +10,8 @@ from .models import (
     ExtendedWeatherSnapshot,
     IoTConfiguration,
     StationRequestLog,
+    SupportTicket,
+    SupportTicketMessage,
     WeatherStationReading,
 )
 
@@ -60,6 +62,22 @@ class DWDSupportMessageAdmin(admin.ModelAdmin):
     list_display = ("id", "application", "sender", "is_system", "created_at")
     list_filter = ("is_system", "created_at")
     search_fields = ("application__city", "sender__username", "sender__email", "message")
+    readonly_fields = ("created_at",)
+
+
+@admin.register(SupportTicket)
+class SupportTicketAdmin(admin.ModelAdmin):
+    list_display = ("id", "requester", "subject", "category", "status", "priority", "updated_at", "created_at")
+    list_filter = ("status", "priority", "category", "created_at")
+    search_fields = ("requester__username", "requester__email", "subject")
+    readonly_fields = ("created_at", "updated_at", "closed_at")
+
+
+@admin.register(SupportTicketMessage)
+class SupportTicketMessageAdmin(admin.ModelAdmin):
+    list_display = ("id", "ticket", "sender", "is_system", "created_at")
+    list_filter = ("is_system", "created_at")
+    search_fields = ("ticket__subject", "sender__username", "sender__email", "message")
     readonly_fields = ("created_at",)
 
 

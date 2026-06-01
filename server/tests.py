@@ -23,6 +23,8 @@ from server.models import (
     IoTConfiguration,
     ProviderHealth,
     StationRequestLog,
+    SupportTicket,
+    SupportTicketMessage,
     SystemEvent,
     WeatherStationReading,
     WeatherHourlySnapshot,
@@ -1225,6 +1227,60 @@ class DWDProviderApplicationApiTests(TestCase):
         self.assertEqual(marked.status_code, 200)
         notification.refresh_from_db()
         self.assertTrue(notification.is_read)
+
+    def test_support_ticket_flow_notifies_admin_and_user(self):
+        self.client.force_authenticate(user=self.user)
+
+        created = self.client.post(
+            "/api/support/tickets/",
+            {"subject": "Weather page is down", "message": "The chart does not render.", "category": "service"},
+            format="json",
+        )
+
+        self.assertEqual(created.status_code, 201)
+        ticket = SupportTicket.objects.get(pk=created.data["id"])
+        self.assertEqual(ticket.requester, self.user)
+        self.assertTrue(SupportTicketMessage.objects.filter(ticket=ticket, sender=self.user).exists())
+        self.assertTrue(
+            DWDNotification.objects.filter(
+                recipient=self.admin,
+                notification_type=DWDNotification.TYPE_SUPPORT_TICKET,
+                support_ticket=ticket,
+            ).exists()
+        )
+
+        self.client.force_authenticate(user=self.admin)
+        reply = self.client.post(
+            f"/api/support/tickets/{ticket.pk}/messages/",
+            {"message": "We are checking it."},
+            format="json",
+        )
+        updated = self.client.patch(
+            f"/api/support/tickets/{ticket.pk}/",
+            {"status": SupportTicket.STATUS_RESOLVED},
+            format="json",
+        )
+
+        self.assertEqual(reply.status_code, 201)
+        self.assertEqual(updated.status_code, 200)
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.status, SupportTicket.STATUS_RESOLVED)
+        self.assertTrue(
+            DWDNotification.objects.filter(
+                recipient=self.user,
+                notification_type=DWDNotification.TYPE_SUPPORT_MESSAGE,
+                support_ticket=ticket,
+            ).exists()
+        )
+
+    def test_user_cannot_read_another_support_ticket(self):
+        ticket = SupportTicket.objects.create(requester=self.user, subject="Private ticket")
+        other = get_user_model().objects.create_user(username="support-other", password="password123")
+        self.client.force_authenticate(user=other)
+
+        response = self.client.get(f"/api/support/tickets/{ticket.pk}/")
+
+        self.assertEqual(response.status_code, 404)
 
     def test_regular_user_cannot_manage_provisioning(self):
         application = self.create_application(city="Berlin")

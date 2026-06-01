@@ -292,6 +292,36 @@ export function sendDwdApplicationMessage(applicationId, message, tokens) {
   }, tokens);
 }
 
+export function listSupportTickets(tokens, params = {}) {
+  const query = new URLSearchParams(params).toString();
+  return apiRequest(`/support/tickets/${query ? `?${query}` : ""}`, {}, tokens);
+}
+
+export function createSupportTicket(payload, tokens) {
+  return apiRequest("/support/tickets/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }, tokens);
+}
+
+export function updateSupportTicket(id, payload, tokens) {
+  return apiRequest(`/support/tickets/${id}/`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  }, tokens);
+}
+
+export function listSupportTicketMessages(ticketId, tokens) {
+  return apiRequest(`/support/tickets/${ticketId}/messages/`, {}, tokens);
+}
+
+export function sendSupportTicketMessage(ticketId, message, tokens) {
+  return apiRequest(`/support/tickets/${ticketId}/messages/`, {
+    method: "POST",
+    body: JSON.stringify({ message }),
+  }, tokens);
+}
+
 export function listAdminDwdProvisioning(tokens) {
   return apiRequest("/admin/dwd/provisioning/", {}, tokens);
 }

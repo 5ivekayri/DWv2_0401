@@ -29,6 +29,9 @@ from .dwd_views import (
     DWDProviderApplicationDetailView,
     DWDProviderApplicationListCreateView,
     ProviderDashboardView,
+    SupportTicketDetailView,
+    SupportTicketMessagesView,
+    SupportTicketsView,
 )
 from .views import (
     AIOutfitRecommendationView,
@@ -96,6 +99,9 @@ urlpatterns = [
     path("provider-dashboard/", ProviderDashboardView.as_view(), name="provider_dashboard"),
     path("dwd/notifications/", DWDNotificationsView.as_view(), name="dwd_notifications"),
     path("dwd/notifications/<int:pk>/read/", DWDNotificationReadView.as_view(), name="dwd_notification_read"),
+    path("support/tickets/", SupportTicketsView.as_view(), name="support_tickets"),
+    path("support/tickets/<int:pk>/", SupportTicketDetailView.as_view(), name="support_ticket_detail"),
+    path("support/tickets/<int:pk>/messages/", SupportTicketMessagesView.as_view(), name="support_ticket_messages"),
     path("geocode", GeocodeView.as_view(), name="geocode"),
     path("geocode/", GeocodeView.as_view(), name="geocode_slash"),
     path("weather", WeatherView.as_view(), name="weather"),
