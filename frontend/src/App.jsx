@@ -1336,6 +1336,9 @@ function App() {
           notifications={dwdNotifications}
           messagesByApplication={dwdMessages}
           chatDrafts={chatDrafts}
+          supportTickets={supportTickets}
+          supportMessages={supportMessages}
+          supportDrafts={supportDrafts}
           loading={loading.dwd}
           loadDwd={loadDwd}
           onRoleChange={handleDwdRoleChange}
@@ -1354,6 +1357,9 @@ function App() {
           onNotificationRead={handleNotificationRead}
           onChatDraftChange={(applicationId, value) => setChatDrafts((current) => ({ ...current, [applicationId]: value }))}
           onSupportMessageSubmit={handleSupportMessageSubmit}
+          onSupportDraftChange={(ticketId, value) => setSupportDrafts((current) => ({ ...current, [ticketId]: value }))}
+          onSupportTicketMessageSubmit={handleSupportTicketMessageSubmit}
+          onSupportTicketStatus={handleSupportTicketStatus}
           navigate={navigate}
         />
       ) : (
@@ -2249,7 +2255,17 @@ function AdminDwdChatsPage({ applications, selectedApplicationId, messagesByAppl
   );
 }
 
-function AdminSupportPage({ tickets, selectedTicketId, messagesByTicket, drafts, loading, onDraftChange, onSend, onStatusChange, navigate }) {
+function AdminSupportPage({
+  tickets = [],
+  selectedTicketId,
+  messagesByTicket = {},
+  drafts = {},
+  loading,
+  onDraftChange = () => {},
+  onSend = () => {},
+  onStatusChange = () => {},
+  navigate,
+}) {
   const selected = tickets.find((ticket) => String(ticket.id) === String(selectedTicketId)) || tickets[0] || null;
   return (
     <div className="admin-page-grid">
@@ -2270,6 +2286,7 @@ function AdminSupportPage({ tickets, selectedTicketId, messagesByTicket, drafts,
             </div>
           ))}
         </div>
+        {!tickets.length && <p className="empty-state">Обращений в техподдержку пока нет.</p>}
       </AdminTableCard>
       {selected && (
         <article className="dwd-card support-chat">
