@@ -888,9 +888,9 @@ function App() {
   async function handleDwdApprove(applicationId) {
     await runTask("dwd", async () => {
       const application = await approveDwdApplication(applicationId, tokens);
-      prepareProvisioning(application);
       await refreshDwdData(tokens);
-      setNotice("Заявка DWD одобрена. Роль provider и карточка устройства готовы.");
+      prepareProvisioning(application);
+      setNotice("Заявка DWD одобрена. Теперь можно сразу сгенерировать код прошивки.");
     });
   }
 
@@ -1018,7 +1018,7 @@ function App() {
       user_id: application?.user?.id ? String(application.user.id) : "",
       device_id: device?.id ? String(device.id) : "",
     });
-    navigate("/admin-panel/instructions");
+    navigate("/admin-panel/provisioning");
     window.setTimeout(() => document.getElementById("dwd-provisioning-form")?.scrollIntoView({ behavior: "smooth" }), 40);
   }
 
@@ -1057,7 +1057,7 @@ function App() {
     await runTask("dwd", async () => {
       await createDwdProvisioning(payload, tokens);
       await refreshDwdData(tokens);
-      setNotice("Инструкция по прошивке сохранена.");
+      setNotice("Код прошивки сгенерирован. Провайдер сможет скопировать его в личном кабинете.");
     });
   }
 
@@ -1781,15 +1781,16 @@ function AdminPanelPage({
   const adminSections = [
     ["users", "Пользователи и роли"],
     ["applications", "Заявки"],
-    ["provisioning", "Выдача прошивки"],
+    ["provisioning", "Прошивка"],
     ["devices", "Устройства"],
     ["events", "События устройств"],
     ["console", "Консоль"],
     ["support", "Техподдержка"],
     ["dwd-chat", "DWD чат"],
-    ["instructions", "Инструкции"],
   ];
-  const currentSection = adminSections.find(([key]) => pathname.includes(`/admin-panel/${key}`))?.[0]
+  const currentSection = pathname.includes("/admin-panel/instructions")
+    ? "provisioning"
+    : adminSections.find(([key]) => pathname.includes(`/admin-panel/${key}`))?.[0]
     || (pathname.includes("/admin-panel/serial") ? "console" : "users");
   const selectedApplicationId = pathname.match(/\/admin-panel\/applications\/(\d+)/)?.[1];
   const selectedDwdChatId = pathname.match(/\/admin-panel\/dwd-chat\/(\d+)/)?.[1];
@@ -1824,9 +1825,15 @@ function AdminPanelPage({
       return (
         <AdminProvisioningPage
           applications={applications}
+          provisioningRecords={provisioningRecords}
+          provisioningForm={provisioningForm}
           loading={loading}
           onApprove={onApprove}
           onReject={onReject}
+          onPrepareProvisioning={onPrepareProvisioning}
+          onProvisioningFieldChange={onProvisioningFieldChange}
+          onProvisioningSubmit={onProvisioningSubmit}
+          onProvisioningSent={onProvisioningSent}
           navigate={navigate}
         />
       );
@@ -1884,18 +1891,21 @@ function AdminPanelPage({
         />
       );
     }
-      return (
-        <AdminInstructionsPage
-          applications={applications}
-          provisioningRecords={provisioningRecords}
-          provisioningForm={provisioningForm}
-          loading={loading}
-          onPrepareProvisioning={onPrepareProvisioning}
-          onProvisioningFieldChange={onProvisioningFieldChange}
-          onProvisioningSubmit={onProvisioningSubmit}
-          onProvisioningSent={onProvisioningSent}
-        />
-      );
+    return (
+      <AdminProvisioningPage
+        applications={applications}
+        provisioningRecords={provisioningRecords}
+        provisioningForm={provisioningForm}
+        loading={loading}
+        onApprove={onApprove}
+        onReject={onReject}
+        onPrepareProvisioning={onPrepareProvisioning}
+        onProvisioningFieldChange={onProvisioningFieldChange}
+        onProvisioningSubmit={onProvisioningSubmit}
+        onProvisioningSent={onProvisioningSent}
+        navigate={navigate}
+      />
+    );
   }
 
   return (
@@ -2008,8 +2018,10 @@ function AdminApplicationsPage({
               <span>{application.reviewed_by ? `${application.reviewed_by.username} / ${formatDate(application.reviewed_at)}` : "не проверена"}</span>
               <span className="row-actions">
                 <button className="icon-text-button" type="button" onClick={() => navigate(`/admin-panel/applications/${application.id}`)}>Открыть</button>
+                <button className="icon-text-button" type="button" onClick={() => navigate(`/admin-panel/dwd-chat/${application.id}`)}>Чат</button>
                 {application.status === "pending" && <button className="icon-text-button" disabled={loading} type="button" onClick={() => onApprove(application.id)}>Одобрить</button>}
                 {application.status === "pending" && <button className="icon-text-button" disabled={loading} type="button" onClick={() => onReject(application.id)}>Отклонить</button>}
+                {application.status === "approved" && <button className="icon-text-button" disabled={loading} type="button" onClick={() => onPrepareProvisioning(application)}>Прошивка</button>}
               </span>
             </div>
           ))}
@@ -2019,6 +2031,8 @@ function AdminApplicationsPage({
         <ApplicationDetailCard
           application={selected}
           loading={loading}
+          onApprove={onApprove}
+          onReject={onReject}
           onApplicationNote={onApplicationNote}
           onPrepareProvisioning={onPrepareProvisioning}
           messages={messagesByApplication[selected.id] || []}
@@ -2034,6 +2048,8 @@ function AdminApplicationsPage({
 function ApplicationDetailCard({
   application,
   loading,
+  onApprove,
+  onReject,
   onApplicationNote,
   onPrepareProvisioning,
   messages,
@@ -2055,13 +2071,10 @@ function ApplicationDetailCard({
         <Metric icon={<ShieldCheck size={18} />} label="Проверка" value={application.reviewed_by ? `${application.reviewed_by.username} / ${formatDate(application.reviewed_at)}` : "не проверена"} />
       </div>
       <p className="empty-state">{application.comment}</p>
-      <label>
-        <span>Заметка админа</span>
-        <textarea value={note} onChange={(event) => setNote(event.target.value)} />
-      </label>
       <div className="row-actions">
-        <button className="primary-button" type="button" disabled={loading} onClick={() => onApplicationNote(application.id, note)}>Сохранить заметку</button>
-        {application.status === "approved" && <button className="icon-text-button" type="button" onClick={() => onPrepareProvisioning(application)}>Подготовить прошивку</button>}
+        {application.status === "pending" && <button className="primary-button compact-action" disabled={loading} type="button" onClick={() => onApprove(application.id)}>Одобрить заявку</button>}
+        {application.status === "pending" && <button className="danger-button compact-danger" disabled={loading} type="button" onClick={() => onReject(application.id)}>Отклонить заявку</button>}
+        {application.status === "approved" && <button className="primary-button compact-action" type="button" onClick={() => onPrepareProvisioning(application)}>Сгенерировать прошивку</button>}
       </div>
       {application.device && <DeviceSummary device={application.device} />}
       <SupportChat
@@ -2071,37 +2084,72 @@ function ApplicationDetailCard({
         loading={loading}
         onDraftChange={onChatDraftChange}
         onSend={onSupportMessageSubmit}
-        title="Чат поддержки"
+        title="Чат с провайдером"
       />
+      <label>
+        <span>Заметка админа</span>
+        <textarea value={note} onChange={(event) => setNote(event.target.value)} />
+      </label>
+      <div className="row-actions">
+        <button className="primary-button" type="button" disabled={loading} onClick={() => onApplicationNote(application.id, note)}>Сохранить заметку</button>
+      </div>
     </article>
   );
 }
 
-function AdminProvisioningPage({ applications, loading, onApprove, onReject, navigate }) {
+function AdminProvisioningPage({
+  applications,
+  provisioningRecords,
+  provisioningForm,
+  loading,
+  onApprove,
+  onReject,
+  onPrepareProvisioning,
+  onProvisioningFieldChange,
+  onProvisioningSubmit,
+  onProvisioningSent,
+  navigate,
+}) {
   return (
-    <AdminTableCard title="Выдача прошивки: заявки" icon={<Radio size={20} />}>
-      <p className="empty-state">Сначала одобрите или отклоните заявку. После одобрения инструкцию и тип прошивки можно оформить во вкладке “Инструкции”.</p>
-      <div className="admin-table admin-table-applications">
-        <div className="admin-row admin-row-head">
-          <span>ID</span><span>Пользователь</span><span>Email для связи</span><span>Город</span><span>Комментарий</span><span>Статус</span><span>Действия</span>
-        </div>
-        {applications.map((application) => (
-          <div className="admin-row" key={application.id}>
-            <span>{application.id}</span>
-            <span>{application.user?.username}</span>
-            <span>{application.email}</span>
-            <span>{application.city}</span>
-            <span>{application.comment}</span>
-            <span><StatusPill value={application.status} /></span>
-            <span className="row-actions">
-              <button className="icon-text-button" type="button" onClick={() => navigate(`/admin-panel/applications/${application.id}`)}>Открыть</button>
-              {application.status === "pending" && <button className="primary-button compact-action" disabled={loading} type="button" onClick={() => onApprove(application.id)}>Одобрить</button>}
-              {application.status === "pending" && <button className="danger-button compact-danger" disabled={loading} type="button" onClick={() => onReject(application.id)}>Отклонить</button>}
-            </span>
+    <div className="admin-page-grid">
+      <AdminTableCard title="Заявки и решение" icon={<Radio size={20} />}>
+        <p className="empty-state">Здесь весь поток: отклонить заявку, одобрить её или сразу подготовить код прошивки для уже одобренного провайдера.</p>
+        <div className="admin-table admin-table-applications">
+          <div className="admin-row admin-row-head">
+            <span>ID</span><span>Пользователь</span><span>Email для связи</span><span>Город</span><span>Комментарий</span><span>Статус</span><span>Действия</span>
           </div>
-        ))}
-      </div>
-    </AdminTableCard>
+          {applications.map((application) => (
+            <div className="admin-row" key={application.id}>
+              <span>{application.id}</span>
+              <span>{application.user?.username}</span>
+              <span>{application.email}</span>
+              <span>{application.city}</span>
+              <span>{application.comment}</span>
+              <span><StatusPill value={application.status} /></span>
+              <span className="row-actions">
+                <button className="icon-text-button" type="button" onClick={() => navigate(`/admin-panel/applications/${application.id}`)}>Открыть</button>
+                <button className="icon-text-button" type="button" onClick={() => navigate(`/admin-panel/dwd-chat/${application.id}`)}>Чат</button>
+                {application.status === "pending" && <button className="primary-button compact-action" disabled={loading} type="button" onClick={() => onApprove(application.id)}>Одобрить</button>}
+                {application.status === "pending" && <button className="danger-button compact-danger" disabled={loading} type="button" onClick={() => onReject(application.id)}>Отклонить</button>}
+                {application.status === "approved" && <button className="icon-text-button" disabled={loading} type="button" onClick={() => onPrepareProvisioning(application)}>Подготовить код</button>}
+              </span>
+            </div>
+          ))}
+        </div>
+      </AdminTableCard>
+
+      <AdminTableCard title="Автогенерация прошивки" icon={<Send size={20} />}>
+        <ProvisioningForm
+          applications={applications}
+          provisioningForm={provisioningForm}
+          loading={loading}
+          onPrepareProvisioning={onPrepareProvisioning}
+          onProvisioningFieldChange={onProvisioningFieldChange}
+          onProvisioningSubmit={onProvisioningSubmit}
+        />
+        <ProvisioningList records={provisioningRecords} loading={loading} onProvisioningSent={onProvisioningSent} showInstruction />
+      </AdminTableCard>
+    </div>
   );
 }
 
