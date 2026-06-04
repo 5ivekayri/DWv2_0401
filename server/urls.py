@@ -1,6 +1,8 @@
 from django.urls import path
 
 from .admin_views import (
+    AdminAIOutfitRecommendationRegenerateView,
+    AdminAIOutfitRecommendationsView,
     AdminDashboardView,
     AdminIotConfigView,
     AdminIotStatusView,
@@ -53,6 +55,12 @@ urlpatterns = [
     path("admin/providers/status/", AdminProvidersStatusView.as_view(), name="admin_providers_status"),
     path("admin/providers/check/", AdminProviderCheckView.as_view(), name="admin_provider_check"),
     path("admin/race/stats/", AdminRaceStatsView.as_view(), name="admin_race_stats"),
+    path("admin/ai/outfit-recommendations/", AdminAIOutfitRecommendationsView.as_view(), name="admin_ai_outfit_recommendations"),
+    path(
+        "admin/ai/outfit-recommendations/<int:pk>/regenerate/",
+        AdminAIOutfitRecommendationRegenerateView.as_view(),
+        name="admin_ai_outfit_recommendation_regenerate",
+    ),
     path("admin/iot/config/", AdminIotConfigView.as_view(), name="admin_iot_config"),
     path("admin/iot/status/", AdminIotStatusView.as_view(), name="admin_iot_status"),
     path("admin/logs/", AdminLogsView.as_view(), name="admin_logs"),

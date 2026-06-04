@@ -71,3 +71,23 @@ class OutfitRecommendationService:
             recommendation_text=recommendation_text,
         )
         return obj, True
+
+    def regenerate_recommendation(self, obj: AIOutfitRecommendation) -> AIOutfitRecommendation:
+        system_prompt = build_system_prompt()
+        user_prompt = build_user_prompt(
+            city=obj.city,
+            temperature_c=obj.temperature_c,
+            humidity=obj.humidity,
+            wind_speed_ms=obj.wind_speed_ms,
+            precipitation_mm=obj.precipitation_mm,
+            condition=obj.condition,
+        )
+        recommendation_text, model_name = self.client.create_completion(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+        obj.recommendation_text = recommendation_text
+        obj.model_name = model_name
+        obj.prompt_version = PROMPT_VERSION
+        obj.save(update_fields=["recommendation_text", "model_name", "prompt_version"])
+        return obj

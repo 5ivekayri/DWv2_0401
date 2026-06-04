@@ -54,6 +54,7 @@ import {
   listAdminDwdDevices,
   listAdminDwdProvisioning,
   listAdminDwdUsers,
+  listAdminAiOutfitRecommendations,
   listDwdApplicationMessages,
   listDwdNotifications,
   listStationRequests,
@@ -64,6 +65,7 @@ import {
   markDwdProvisioningSent,
   markDwdNotificationRead,
   readTokens,
+  regenerateAdminAiOutfitRecommendation,
   rejectDwdApplication,
   runAdminDwdDeviceAction,
   saveTokens,
@@ -280,6 +282,7 @@ function App() {
   const [adminDwdProvisioning, setAdminDwdProvisioning] = useState([]);
   const [adminDwdEvents, setAdminDwdEvents] = useState([]);
   const [adminStationRequests, setAdminStationRequests] = useState([]);
+  const [adminAiOutfits, setAdminAiOutfits] = useState([]);
   const [adminIotConfig, setAdminIotConfig] = useState(null);
   const [adminIotStatus, setAdminIotStatus] = useState(null);
   const [iotConfigForm, setIotConfigForm] = useState(DEFAULT_IOT_CONFIG_FORM);
@@ -330,6 +333,7 @@ function App() {
       setAdminDwdProvisioning([]);
       setAdminDwdEvents([]);
       setAdminStationRequests([]);
+      setAdminAiOutfits([]);
       setAdminIotConfig(null);
       setAdminIotStatus(null);
       setIotConfigForm(DEFAULT_IOT_CONFIG_FORM);
@@ -797,13 +801,14 @@ function App() {
     }
 
     try {
-      const [users, applications, devices, provisioning, events, stationRequests, iotConfig, iotStatus] = await Promise.all([
+      const [users, applications, devices, provisioning, events, stationRequests, aiOutfits, iotConfig, iotStatus] = await Promise.all([
         listAdminDwdUsers(nextTokens),
         listAdminDwdApplications(nextTokens),
         listAdminDwdDevices(nextTokens),
         listAdminDwdProvisioning(nextTokens),
         listAdminDwdDeviceEvents(nextTokens, { limit: 200 }),
         listStationRequests(nextTokens, { limit: 100 }),
+        listAdminAiOutfitRecommendations(nextTokens, { limit: 100 }),
         getAdminIotConfig(nextTokens),
         getAdminIotStatus(nextTokens),
       ]);
@@ -814,6 +819,7 @@ function App() {
       setAdminDwdProvisioning(Array.isArray(provisioning) ? provisioning : []);
       setAdminDwdEvents(Array.isArray(events) ? events : []);
       setAdminStationRequests(Array.isArray(stationRequests?.results) ? stationRequests.results : []);
+      setAdminAiOutfits(Array.isArray(aiOutfits) ? aiOutfits : []);
       setAdminIotConfig(iotConfig || null);
       setAdminIotStatus(iotStatus || null);
       setIotConfigForm(toIotConfigForm(iotConfig));
@@ -826,6 +832,7 @@ function App() {
         setAdminDwdProvisioning([]);
         setAdminDwdEvents([]);
         setAdminStationRequests([]);
+        setAdminAiOutfits([]);
         setAdminIotConfig(null);
         setAdminIotStatus(null);
         setIotConfigForm(DEFAULT_IOT_CONFIG_FORM);
@@ -1009,6 +1016,15 @@ function App() {
       await updateSupportTicket(ticketId, { status }, tokens);
       await refreshDwdData(tokens);
       setNotice("Статус тикета обновлён.");
+    });
+  }
+
+  async function handleAiOutfitRegenerate(recommendationId) {
+    await runTask("dwd", async () => {
+      await regenerateAdminAiOutfitRecommendation(recommendationId, tokens);
+      const aiOutfits = await listAdminAiOutfitRecommendations(tokens, { limit: 100 });
+      setAdminAiOutfits(Array.isArray(aiOutfits) ? aiOutfits : []);
+      setNotice("AI-совет перегенерирован.");
     });
   }
 
@@ -1329,6 +1345,7 @@ function App() {
           provisioningRecords={adminDwdProvisioning}
           events={adminDwdEvents}
           stationRequests={adminStationRequests}
+          aiOutfits={adminAiOutfits}
           iotConfig={adminIotConfig}
           iotStatus={adminIotStatus}
           iotConfigForm={iotConfigForm}
@@ -1360,6 +1377,7 @@ function App() {
           onSupportDraftChange={(ticketId, value) => setSupportDrafts((current) => ({ ...current, [ticketId]: value }))}
           onSupportTicketMessageSubmit={handleSupportTicketMessageSubmit}
           onSupportTicketStatus={handleSupportTicketStatus}
+          onAiOutfitRegenerate={handleAiOutfitRegenerate}
           navigate={navigate}
         />
       ) : (
@@ -1814,6 +1832,7 @@ function AdminPanelPage({
   provisioningRecords,
   events,
   stationRequests,
+  aiOutfits,
   iotConfig,
   iotStatus,
   iotConfigForm,
@@ -1845,6 +1864,7 @@ function AdminPanelPage({
   onSupportDraftChange,
   onSupportTicketMessageSubmit,
   onSupportTicketStatus,
+  onAiOutfitRegenerate,
   navigate,
 }) {
   const adminSections = [
@@ -1854,6 +1874,7 @@ function AdminPanelPage({
     ["devices", "Устройства"],
     ["events", "События устройств"],
     ["console", "Консоль"],
+    ["ai-outfits", "AI советы"],
     ["support", "Техподдержка"],
     ["dwd-chat", "DWD чат"],
   ];
@@ -1928,6 +1949,15 @@ function AdminPanelPage({
         <AdminStationConsolePage
           iotStatus={iotStatus}
           stationRequests={stationRequests}
+        />
+      );
+    }
+    if (currentSection === "ai-outfits") {
+      return (
+        <AdminAiOutfitsPage
+          records={aiOutfits}
+          loading={loading}
+          onRegenerate={onAiOutfitRegenerate}
         />
       );
     }
@@ -2547,6 +2577,59 @@ function StationRequestsTable({ requests = [] }) {
         );
       })}
     </div>
+  );
+}
+
+function AdminAiOutfitsPage({ records = [], loading, onRegenerate }) {
+  const [cityFilter, setCityFilter] = useState("");
+  const normalizedFilter = cityFilter.trim().toLowerCase();
+  const visibleRecords = normalizedFilter
+    ? records.filter((record) => String(record.city || "").toLowerCase().includes(normalizedFilter))
+    : records;
+
+  return (
+    <AdminTableCard title="AI советы по городам" icon={<Sparkles size={20} />}>
+      <p className="empty-state">
+        Здесь видны сохранённые советы по одежде. Если LLM выдала странный текст, перегенерируйте конкретную запись.
+      </p>
+      <label className="wide-field">
+        <span>Фильтр по городу</span>
+        <input
+          value={cityFilter}
+          onChange={(event) => setCityFilter(event.target.value)}
+          placeholder="Например, Саранск"
+        />
+      </label>
+      {visibleRecords.length ? (
+        <div className="dwd-list ai-outfit-admin-list">
+          {visibleRecords.map((record) => (
+            <div className="dwd-list-item" key={record.id}>
+              <div>
+                <strong>{record.city}</strong>
+                <small>
+                  {formatDate(record.hour_bucket)} / {formatNumber(record.temperature_c)} °C / ветер {formatNumber(record.wind_speed_ms)} m/s / осадки {formatNumber(record.precipitation_mm)} mm
+                </small>
+                <small>Модель: {record.model || "не указана"} / prompt {record.prompt_version}</small>
+                <p>{cleanRecommendationText(record.recommendation)}</p>
+              </div>
+              <div className="row-actions">
+                <button
+                  className="icon-text-button"
+                  type="button"
+                  disabled={loading}
+                  onClick={() => onRegenerate(record.id)}
+                >
+                  {loading ? <RefreshCw className="spin" size={16} /> : <Sparkles size={16} />}
+                  Перегенерировать
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="empty-state">AI-советов пока нет или фильтр ничего не нашёл.</p>
+      )}
+    </AdminTableCard>
   );
 }
 

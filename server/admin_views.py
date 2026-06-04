@@ -8,6 +8,7 @@ from typing import Any
 from django.conf import settings
 from django.core.cache import cache
 from django.db import connection
+from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
@@ -16,7 +17,7 @@ from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, OpenApiType
 
 from server.ai.service import OutfitRecommendationService
 from server.iot.config import get_iot_config, serialize_iot_config
-from server.models import DWDDevice, IoTConfiguration, ProviderHealth, RaceRun, SystemEvent
+from server.models import AIOutfitRecommendation, DWDDevice, IoTConfiguration, ProviderHealth, RaceRun, SystemEvent
 from server.monitoring import (
     KNOWN_PROVIDERS,
     KNOWN_RACE_PROVIDERS,
@@ -56,6 +57,24 @@ PROVIDER_CHECK_RESPONSE = inline_serializer(
         "response_ms": serializers.FloatField(required=False, allow_null=True),
         "sample": serializers.DictField(required=False, allow_null=True),
         "error": serializers.CharField(required=False, allow_null=True),
+    },
+)
+
+AI_OUTFIT_ADMIN_RESPONSE = inline_serializer(
+    name="AdminAIOutfitRecommendation",
+    fields={
+        "id": serializers.IntegerField(),
+        "city": serializers.CharField(),
+        "hour_bucket": serializers.DateTimeField(),
+        "temperature_c": serializers.FloatField(),
+        "humidity": serializers.FloatField(),
+        "wind_speed_ms": serializers.FloatField(),
+        "precipitation_mm": serializers.FloatField(),
+        "condition": serializers.CharField(allow_blank=True),
+        "model": serializers.CharField(),
+        "prompt_version": serializers.CharField(),
+        "recommendation": serializers.CharField(),
+        "created_at": serializers.DateTimeField(),
     },
 )
 
@@ -114,6 +133,23 @@ def provider_configuration(provider_name: str, provider) -> tuple[bool, str, str
     if not enabled:
         return False, ProviderHealth.STATUS_NOT_CONFIGURED, "API key is not configured"
     return True, ProviderHealth.STATUS_OK, None
+
+
+def ai_outfit_to_payload(obj: AIOutfitRecommendation) -> dict:
+    return {
+        "id": obj.pk,
+        "city": obj.city,
+        "hour_bucket": utc_iso(obj.hour_bucket),
+        "temperature_c": obj.temperature_c,
+        "humidity": obj.humidity,
+        "wind_speed_ms": obj.wind_speed_ms,
+        "precipitation_mm": obj.precipitation_mm,
+        "condition": obj.condition,
+        "model": obj.model_name,
+        "prompt_version": obj.prompt_version,
+        "recommendation": obj.recommendation_text,
+        "created_at": utc_iso(obj.created_at),
+    }
 
 
 def sync_provider_health() -> list[ProviderHealth]:
@@ -422,6 +458,77 @@ class AdminRaceStatsView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class AdminAIOutfitRecommendationsView(APIView):
+    permission_classes = [IsAdminUser]
+
+    @extend_schema(
+        description="Admin-only list of cached AI outfit recommendations with optional city filtering.",
+        parameters=[
+            OpenApiParameter("city", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False),
+            OpenApiParameter("limit", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False),
+        ],
+        responses=documented_responses(),
+    )
+    def get(self, request):
+        city = str(request.query_params.get("city", "")).strip()
+        try:
+            limit = int(request.query_params.get("limit", 100))
+        except (TypeError, ValueError):
+            return Response({"detail": "limit must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+        limit = max(1, min(limit, 200))
+
+        queryset = AIOutfitRecommendation.objects.all().order_by("-hour_bucket", "-created_at", "-id")
+        if city:
+            queryset = queryset.filter(city__icontains=city)
+
+        return Response([ai_outfit_to_payload(obj) for obj in queryset[:limit]], status=status.HTTP_200_OK)
+
+
+class AdminAIOutfitRecommendationRegenerateView(APIView):
+    permission_classes = [IsAdminUser]
+
+    @extend_schema(
+        description="Admin-only regeneration of a cached AI outfit recommendation using its saved weather parameters.",
+        responses=documented_responses(AI_OUTFIT_ADMIN_RESPONSE),
+    )
+    def post(self, request, pk: int):
+        obj = get_object_or_404(AIOutfitRecommendation, pk=pk)
+        service = OutfitRecommendationService()
+        if not service.client.is_enabled():
+            return Response({"detail": "AI service is not configured"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        started = time.perf_counter()
+        try:
+            regenerated = service.regenerate_recommendation(obj)
+        except Exception as exc:
+            record_system_event(
+                event="admin_ai_outfit_regenerate_failed",
+                source="admin",
+                level="ERROR",
+                message=f"AI outfit regeneration failed for recommendation {pk}",
+                payload={"recommendation_id": pk, "city": obj.city, "error": type(exc).__name__, "user_id": request.user.pk},
+            )
+            return Response(
+                {"detail": f"AI recommendation regeneration failed: {type(exc).__name__}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        record_system_event(
+            event="admin_ai_outfit_regenerated",
+            source="admin",
+            message=f"AI outfit recommendation regenerated for {regenerated.city}",
+            payload={
+                "recommendation_id": regenerated.pk,
+                "city": regenerated.city,
+                "model": regenerated.model_name,
+                "duration_ms": duration_ms,
+                "user_id": request.user.pk,
+            },
+        )
+        return Response(ai_outfit_to_payload(regenerated), status=status.HTTP_200_OK)
 
 
 class AdminIotStatusView(APIView):

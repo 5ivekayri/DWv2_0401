@@ -253,6 +253,15 @@ export function listAdminLogs(tokens, params = {}) {
   return apiRequest(`/admin/logs/${query ? `?${query}` : ""}`, {}, tokens);
 }
 
+export function listAdminAiOutfitRecommendations(tokens, params = {}) {
+  const query = new URLSearchParams(params).toString();
+  return apiRequest(`/admin/ai/outfit-recommendations/${query ? `?${query}` : ""}`, {}, tokens);
+}
+
+export function regenerateAdminAiOutfitRecommendation(id, tokens) {
+  return apiRequest(`/admin/ai/outfit-recommendations/${id}/regenerate/`, { method: "POST" }, tokens);
+}
+
 export function listAdminDwdUsers(tokens) {
   return apiRequest("/admin/dwd/users/", {}, tokens);
 }

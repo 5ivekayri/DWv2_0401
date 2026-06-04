@@ -13,6 +13,7 @@ from rest_framework.test import APIClient
 from django.utils import timezone as django_timezone
 
 from server.models import (
+    AIOutfitRecommendation,
     DWDDevice,
     DWDDeviceEvent,
     DWDNotification,
@@ -215,6 +216,50 @@ class WeatherApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["source"], "db")
+
+    @patch("server.admin_views.OutfitRecommendationService")
+    def test_admin_can_list_and_regenerate_ai_outfit_recommendations(self, service_cls):
+        User = get_user_model()
+        admin = User.objects.create_user(username="ai-admin", password="password123", is_staff=True)
+        regular = User.objects.create_user(username="ai-user", password="password123")
+        recommendation = AIOutfitRecommendation.objects.create(
+            city="Saransk",
+            hour_bucket=datetime(2026, 5, 3, 0, 0, tzinfo=timezone.utc),
+            temperature_c=8.0,
+            humidity=65.0,
+            wind_speed_ms=3.0,
+            precipitation_mm=0.0,
+            condition="cloudy",
+            model_name="old-model",
+            prompt_version="v1",
+            recommendation_text="Old strange recommendation.",
+        )
+
+        self.client.force_authenticate(user=regular)
+        forbidden = self.client.get("/api/admin/ai/outfit-recommendations/")
+        self.assertEqual(forbidden.status_code, 403)
+
+        self.client.force_authenticate(user=admin)
+        listed = self.client.get("/api/admin/ai/outfit-recommendations/", {"city": "Saran"})
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.data[0]["city"], "Saransk")
+        self.assertEqual(listed.data[0]["recommendation"], "Old strange recommendation.")
+
+        def regenerate(obj):
+            obj.recommendation_text = "New sane recommendation."
+            obj.model_name = "new-model"
+            obj.save(update_fields=["recommendation_text", "model_name"])
+            return obj
+
+        service_cls.return_value = SimpleNamespace(
+            client=SimpleNamespace(is_enabled=lambda: True),
+            regenerate_recommendation=regenerate,
+        )
+        regenerated = self.client.post(f"/api/admin/ai/outfit-recommendations/{recommendation.pk}/regenerate/")
+
+        self.assertEqual(regenerated.status_code, 200)
+        self.assertEqual(regenerated.data["recommendation"], "New sane recommendation.")
+        self.assertEqual(regenerated.data["model"], "new-model")
 
     def test_extended_weather_requires_auth(self):
         response = self.client.get("/api/weather/extended/", {"lat": "54.1838", "lon": "45.1749", "days": "7"})
