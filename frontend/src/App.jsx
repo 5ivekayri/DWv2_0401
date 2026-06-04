@@ -3625,7 +3625,7 @@ function ExtendedForecastSection({ isAuthenticated, open, data, loading, onToggl
                     <div className="forecast-summary">
                       <div>
                         <span className="eyebrow">{formatForecastDate(selectedDay?.date)}</span>
-                        <h3>{selectedDay?.conditions || "Подробный прогноз"}</h3>
+                        <h3>{translateWeatherCondition(selectedDay?.conditions) || "Подробный прогноз"}</h3>
                       </div>
                       <span className="cache-pill">{selectedHours.length ? `${selectedHours.length} часов` : "Нет почасовых данных"}</span>
                     </div>
@@ -3641,7 +3641,7 @@ function ExtendedForecastSection({ isAuthenticated, open, data, loading, onToggl
                       <div className="hourly-panel">
                         <div className={`hourly-current hourly-current-${hourTransition}`} key={`${activeDate}-${hourIndex}-${hourTransition}-summary`}>
                           <strong>{activeHour?.time || formatHourLabel(activeHour)}</strong>
-                          <span>{activeHour?.conditions || "Без описания"}</span>
+                          <span>{translateWeatherCondition(activeHour?.conditions) || "Без описания"}</span>
                         </div>
 
                         <div className="hourly-carousel" aria-label="Почасовой прогноз">
@@ -3726,6 +3726,64 @@ function formatForecastDate(value) {
     month: "short",
     weekday: "short",
   }).format(new Date(`${value}T12:00:00`));
+}
+
+const WEATHER_CONDITION_LABELS = {
+  clear: "Ясно",
+  sunny: "Солнечно",
+  cloudy: "Облачно",
+  overcast: "Пасмурно",
+  "partially cloudy": "Переменная облачность",
+  "partly cloudy": "Переменная облачность",
+  "partial cloudly": "Переменная облачность",
+  "partially cloudly": "Переменная облачность",
+  rain: "Дождь",
+  "light rain": "Небольшой дождь",
+  "heavy rain": "Сильный дождь",
+  showers: "Ливневый дождь",
+  drizzle: "Морось",
+  snow: "Снег",
+  "light snow": "Небольшой снег",
+  "heavy snow": "Сильный снег",
+  sleet: "Мокрый снег",
+  "freezing rain": "Ледяной дождь",
+  "freezing drizzle": "Ледяная морось",
+  ice: "Гололёд",
+  hail: "Град",
+  thunderstorm: "Гроза",
+  thunderstorms: "Грозы",
+  fog: "Туман",
+  mist: "Дымка",
+  haze: "Мгла",
+  wind: "Ветрено",
+  windy: "Ветрено",
+  dust: "Пыль",
+  smoke: "Дымка",
+};
+
+function translateWeatherCondition(value) {
+  if (!value) return "";
+  const parts = String(value)
+    .split(/[,;]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (!parts.length) return "";
+
+  return parts.map((part) => {
+    const key = part.toLowerCase().replace(/\s+/g, " ");
+    if (WEATHER_CONDITION_LABELS[key]) return WEATHER_CONDITION_LABELS[key];
+    return part
+      .replace(/\bPartially cloudy\b/gi, "Переменная облачность")
+      .replace(/\bPartly cloudy\b/gi, "Переменная облачность")
+      .replace(/\bPartially cloudly\b/gi, "Переменная облачность")
+      .replace(/\bOvercast\b/gi, "Пасмурно")
+      .replace(/\bCloudy\b/gi, "Облачно")
+      .replace(/\bClear\b/gi, "Ясно")
+      .replace(/\bRain\b/gi, "Дождь")
+      .replace(/\bSnow\b/gi, "Снег")
+      .replace(/\bFog\b/gi, "Туман")
+      .replace(/\bThunderstorm\b/gi, "Гроза");
+  }).join(", ");
 }
 
 function WeatherCard({ weather }) {
