@@ -245,7 +245,7 @@ def generate_mqtt_wifi_firmware(
     return f"""// Dark Weather MQTT WiFi firmware
 // Firmware version: {c_string(firmware_version or "1.0.0")}
 // Station ID: {c_string(station_id)}
-// Wi-Fi fields are optional in the admin panel. If placeholders are present, fill them before upload.
+// Wi-Fi fields are filled by the provider. MQTT access, topic and station ID are issued by Dark Weather.
 
 #include <WiFiS3.h>
 #include <ArduinoMqttClient.h>
@@ -881,6 +881,121 @@ class DWDProvisioningCreateSerializer(serializers.Serializer):
         return provisioning
 
 
+class ProviderFirmwareGenerateSerializer(serializers.Serializer):
+    device_id = serializers.IntegerField(required=False)
+    firmware_type = serializers.ChoiceField(
+        choices=[choice[0] for choice in DWDProvisioning.FIRMWARE_CHOICES],
+        required=False,
+        default=DWDProvisioning.FIRMWARE_ESP01_WIFI,
+    )
+    firmware_version = serializers.CharField(max_length=64, required=False, allow_blank=True, default="1.0.0")
+    wifi_ssid = serializers.CharField(max_length=128, required=True, allow_blank=False, trim_whitespace=True)
+    wifi_password = serializers.CharField(max_length=128, required=False, allow_blank=True, trim_whitespace=False, write_only=True)
+
+    def validate(self, attrs):
+        request = self.context["request"]
+        firmware_type = attrs.get("firmware_type") or DWDProvisioning.FIRMWARE_ESP01_WIFI
+        if firmware_type != DWDProvisioning.FIRMWARE_ESP01_WIFI:
+            raise serializers.ValidationError(
+                {"firmware_type": "Provider autogeneration currently supports MQTT Wi-Fi firmware only."}
+            )
+
+        devices = DWDDevice.objects.select_related("application", "owner").filter(owner=request.user)
+        device_id = attrs.get("device_id")
+        if device_id:
+            device = get_object_or_404(devices, pk=device_id)
+        else:
+            owned_devices = list(devices[:2])
+            if not owned_devices:
+                raise serializers.ValidationError({"device_id": "No DWD device is linked to your account yet."})
+            if len(owned_devices) > 1:
+                raise serializers.ValidationError({"device_id": "Select the DWD device for this firmware."})
+            device = owned_devices[0]
+
+        if device.status == DWDDevice.STATUS_BLOCKED or not device.is_enabled:
+            raise serializers.ValidationError({"device_id": "This DWD device is disabled or blocked."})
+        if device.application_id is None or device.application.status != DWDProviderApplication.STATUS_APPROVED:
+            raise serializers.ValidationError({"device_id": "Firmware can be generated only for an approved DWD application."})
+
+        attrs["device"] = device
+        attrs["application"] = device.application
+        return attrs
+
+    def create(self, validated_data):
+        request = self.context["request"]
+        device = validated_data["device"]
+        application = validated_data["application"]
+        firmware_type = validated_data.get("firmware_type") or DWDProvisioning.FIRMWARE_ESP01_WIFI
+        firmware_version = validated_data.get("firmware_version") or "1.0.0"
+        wifi_ssid = validated_data["wifi_ssid"]
+        wifi_password = validated_data.get("wifi_password", "")
+        firmware_code = generate_mqtt_wifi_firmware(
+            device=device,
+            firmware_version=firmware_version,
+            wifi_ssid=wifi_ssid,
+            wifi_password=wifi_password,
+            request=request,
+        )
+
+        with transaction.atomic():
+            provisioning = (
+                DWDProvisioning.objects.select_for_update()
+                .filter(application=application, user=request.user, device=device)
+                .order_by("-created_at", "-id")
+                .first()
+            )
+            self.created = provisioning is None
+            if provisioning is None:
+                provisioning = DWDProvisioning(
+                    application=application,
+                    user=request.user,
+                    device=device,
+                    delivery_channel=DWDProvisioning.CHANNEL_MANUAL,
+                    instruction_text="Код прошивки автоматически сгенерирован провайдером в личном кабинете.",
+                )
+
+            provisioning.firmware_type = firmware_type
+            provisioning.firmware_version = firmware_version
+            provisioning.wifi_ssid = wifi_ssid
+            provisioning.wifi_password = wifi_password
+            provisioning.firmware_code = firmware_code
+            provisioning.code_generated_at = timezone.now()
+            provisioning.delivery_status = DWDProvisioning.DELIVERY_INSTRUCTION_READY
+            provisioning.save()
+
+            device.firmware_type = firmware_type
+            device.firmware_version = firmware_version
+            device.save(update_fields=["firmware_type", "firmware_version", "updated_at"])
+
+        record_device_event(
+            device=device,
+            event_type=DWDDeviceEvent.EVENT_SETTINGS_CHANGED,
+            message=f"Provider generated firmware code: {firmware_type} {firmware_version}".strip(),
+        )
+        record_system_event(
+            event="dwd_provider_firmware_generated",
+            source="dwd",
+            message=f"Provider {request.user.pk} generated firmware for device {device.pk}",
+            payload={
+                "provisioning_id": provisioning.pk,
+                "application_id": application.pk,
+                "device_id": device.pk,
+                "user_id": request.user.pk,
+                "firmware_type": firmware_type,
+            },
+        )
+        notify_admins(
+            notification_type=DWDNotification.TYPE_PROVISIONING_READY,
+            title="Провайдер сгенерировал прошивку",
+            message=f"{request.user.username} подготовил код для {device.station_id}.",
+            application=application,
+            device=device,
+            provisioning=provisioning,
+            exclude_user_id=request.user.pk,
+        )
+        return provisioning
+
+
 class DWDProvisioningSerializer(serializers.ModelSerializer):
     firmware_code = serializers.SerializerMethodField()
     application_id = serializers.IntegerField(read_only=True)
@@ -1121,6 +1236,26 @@ class ProviderDashboardView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class ProviderFirmwareGenerateView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProviderFirmwareGenerateSerializer
+
+    @extend_schema(
+        description=(
+            "Provider-only Arduino firmware autogeneration. The provider sends only device/Wi-Fi "
+            "settings; Dark Weather injects station ID, MQTT topic and MQTT credentials itself."
+        ),
+        request=ProviderFirmwareGenerateSerializer,
+        responses=dwd_responses(created_schema=DWDProvisioningSerializer),
+    )
+    def post(self, request):
+        serializer = ProviderFirmwareGenerateSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        provisioning = serializer.save()
+        response_status = status.HTTP_201_CREATED if getattr(serializer, "created", False) else status.HTTP_200_OK
+        return Response(DWDProvisioningSerializer(provisioning).data, status=response_status)
 
 
 def accessible_application_queryset(user):

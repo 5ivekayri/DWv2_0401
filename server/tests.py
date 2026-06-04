@@ -1113,6 +1113,76 @@ class DWDProviderApplicationApiTests(TestCase):
         self.assertIn("PUT_WIFI_PASSWORD_HERE", response.data["firmware_code"])
         self.assertNotIn("wifi_password", response.data)
 
+    @override_settings(
+        MQTT_HOST="127.0.0.1",
+        MQTT_PORT=1883,
+        MQTT_USERNAME="darkweather_device",
+        MQTT_PASSWORD="mqtt-secret",
+        DWD_MQTT_PUBLIC_HOST="mqtt.darkweather.test",
+    )
+    def test_provider_can_generate_and_update_own_firmware_code(self):
+        application = self.create_application(city="Berlin")
+        self.approve_application(application)
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            "/api/provider-firmware/generate/",
+            {
+                "device_id": application.device.pk,
+                "firmware_type": "esp01_wifi",
+                "firmware_version": "1.0.0",
+                "wifi_ssid": "ProviderNet",
+                "wifi_password": "ProviderPass",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(DWDProvisioning.objects.count(), 1)
+        self.assertIn('const char* WIFI_SSID = "ProviderNet";', response.data["firmware_code"])
+        self.assertIn('const char* WIFI_PASSWORD = "ProviderPass";', response.data["firmware_code"])
+        self.assertIn('const char* MQTT_HOST = "mqtt.darkweather.test";', response.data["firmware_code"])
+        self.assertIn('const char* MQTT_USERNAME = "darkweather_device";', response.data["firmware_code"])
+        self.assertIn('const char* MQTT_PASSWORD = "mqtt-secret";', response.data["firmware_code"])
+        self.assertIn(f'const char* STATION_ID = "{application.device.station_id}";', response.data["firmware_code"])
+        self.assertNotIn("wifi_password", response.data)
+
+        updated = self.client.post(
+            "/api/provider-firmware/generate/",
+            {
+                "device_id": application.device.pk,
+                "firmware_type": "esp01_wifi",
+                "firmware_version": "1.0.1",
+                "wifi_ssid": "ProviderNet2",
+                "wifi_password": "ProviderPass2",
+            },
+            format="json",
+        )
+
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(DWDProvisioning.objects.count(), 1)
+        provisioning = DWDProvisioning.objects.get()
+        self.assertEqual(provisioning.firmware_version, "1.0.1")
+        self.assertIn('const char* WIFI_SSID = "ProviderNet2";', provisioning.firmware_code)
+        application.device.refresh_from_db()
+        self.assertEqual(application.device.firmware_type, DWDProvisioning.FIRMWARE_ESP01_WIFI)
+
+    def test_provider_firmware_requires_approved_device(self):
+        self.create_application(city="Berlin")
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            "/api/provider-firmware/generate/",
+            {
+                "firmware_type": "esp01_wifi",
+                "firmware_version": "1.0.0",
+                "wifi_ssid": "ProviderNet",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+
     def test_admin_users_roles_and_device_events_endpoints(self):
         application = self.create_application(city="Berlin")
         self.approve_application(application)

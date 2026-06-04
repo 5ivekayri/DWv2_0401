@@ -272,6 +272,13 @@ export function getProviderDashboard(tokens) {
   return apiRequest("/provider-dashboard/", {}, tokens);
 }
 
+export function generateProviderFirmware(payload, tokens) {
+  return apiRequest("/provider-firmware/generate/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }, tokens);
+}
+
 export function listDwdNotifications(tokens, params = {}) {
   const query = new URLSearchParams(params).toString();
   return apiRequest(`/dwd/notifications/${query ? `?${query}` : ""}`, {}, tokens);

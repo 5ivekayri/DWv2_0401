@@ -48,6 +48,7 @@ import {
   getAdminIotStatus,
   getProviderDashboard,
   getProfile,
+  generateProviderFirmware,
   listAdminDwdDeviceEvents,
   listAdminDwdApplications,
   listAdminDwdDevices,
@@ -122,6 +123,13 @@ const DEFAULT_PROVISIONING_FORM = {
   wifi_password: "",
   delivery_channel: "email",
   notes: "",
+};
+const DEFAULT_PROVIDER_FIRMWARE_FORM = {
+  device_id: "",
+  firmware_type: "esp01_wifi",
+  firmware_version: "1.0.0",
+  wifi_ssid: "",
+  wifi_password: "",
 };
 const DEFAULT_IOT_CONFIG_FORM = {
   connection_mode: "wifi_esp01",
@@ -276,6 +284,7 @@ function App() {
   const [adminIotStatus, setAdminIotStatus] = useState(null);
   const [iotConfigForm, setIotConfigForm] = useState(DEFAULT_IOT_CONFIG_FORM);
   const [provisioningForm, setProvisioningForm] = useState(DEFAULT_PROVISIONING_FORM);
+  const [providerFirmwareForm, setProviderFirmwareForm] = useState(DEFAULT_PROVIDER_FIRMWARE_FORM);
   const [profile, setProfile] = useState(null);
   const [profileForm, setProfileForm] = useState(DEFAULT_PROFILE_FORM);
   const [passwordForm, setPasswordForm] = useState(DEFAULT_PASSWORD_FORM);
@@ -324,12 +333,22 @@ function App() {
       setAdminIotConfig(null);
       setAdminIotStatus(null);
       setIotConfigForm(DEFAULT_IOT_CONFIG_FORM);
+      setProviderFirmwareForm(DEFAULT_PROVIDER_FIRMWARE_FORM);
       setProfile(null);
       setProfileForm(DEFAULT_PROFILE_FORM);
       setPasswordForm(DEFAULT_PASSWORD_FORM);
       setIsDwdAdmin(false);
     }
   }, [isAuthenticated]);
+
+  useEffect(() => {
+    const devices = providerDashboard?.devices || [];
+    if (!devices.length) return;
+    setProviderFirmwareForm((current) => {
+      if (current.device_id) return current;
+      return { ...current, device_id: String(devices[0].id) };
+    });
+  }, [providerDashboard]);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -887,10 +906,9 @@ function App() {
 
   async function handleDwdApprove(applicationId) {
     await runTask("dwd", async () => {
-      const application = await approveDwdApplication(applicationId, tokens);
+      await approveDwdApplication(applicationId, tokens);
       await refreshDwdData(tokens);
-      prepareProvisioning(application);
-      setNotice("Заявка DWD одобрена. Теперь можно сразу сгенерировать код прошивки.");
+      setNotice("Заявка DWD одобрена. Провайдер теперь может сам сгенерировать код прошивки в личном кабинете.");
     });
   }
 
@@ -1069,6 +1087,39 @@ function App() {
     });
   }
 
+  function handleProviderFirmwareField(field, value) {
+    setProviderFirmwareForm((current) => ({ ...current, [field]: value }));
+  }
+
+  async function handleProviderFirmwareSubmit(event) {
+    event.preventDefault();
+    const wifiSsid = providerFirmwareForm.wifi_ssid.trim();
+    if (!wifiSsid) {
+      setNotice("Укажите имя Wi-Fi сети для готовой прошивки.");
+      return;
+    }
+
+    const payload = {
+      device_id: providerFirmwareForm.device_id ? Number(providerFirmwareForm.device_id) : undefined,
+      firmware_type: providerFirmwareForm.firmware_type,
+      firmware_version: providerFirmwareForm.firmware_version,
+      wifi_ssid: wifiSsid,
+      wifi_password: providerFirmwareForm.wifi_password,
+    };
+
+    await runTask("dwd", async () => {
+      const record = await generateProviderFirmware(payload, tokens);
+      await refreshDwdData(tokens);
+      setProviderFirmwareForm((current) => ({
+        ...current,
+        device_id: record.device?.id ? String(record.device.id) : current.device_id,
+        firmware_type: record.firmware_type || current.firmware_type,
+        firmware_version: record.firmware_version || current.firmware_version,
+      }));
+      setNotice("Код прошивки сгенерирован. Его можно скопировать из окна кода.");
+    });
+  }
+
   function handleIotConfigField(field, value) {
     setIotConfigForm((current) => ({ ...current, [field]: value }));
   }
@@ -1229,6 +1280,7 @@ function App() {
           setDwdForm={setDwdForm}
           dwdApplications={dwdApplications}
           providerDashboard={providerDashboard}
+          providerFirmwareForm={providerFirmwareForm}
           notifications={dwdNotifications}
           messagesByApplication={dwdMessages}
           chatDrafts={chatDrafts}
@@ -1237,6 +1289,8 @@ function App() {
           supportDrafts={supportDrafts}
           loading={loading.dwd}
           handleDwdApplicationSubmit={handleDwdApplicationSubmit}
+          onProviderFirmwareFieldChange={handleProviderFirmwareField}
+          onProviderFirmwareSubmit={handleProviderFirmwareSubmit}
           onNotificationRead={handleNotificationRead}
           onChatDraftChange={(applicationId, value) => setChatDrafts((current) => ({ ...current, [applicationId]: value }))}
           onSupportMessageSubmit={handleSupportMessageSubmit}
@@ -1487,11 +1541,14 @@ function ProviderPage({
   setDwdForm,
   dwdApplications,
   providerDashboard,
+  providerFirmwareForm,
   notifications,
   messagesByApplication,
   chatDrafts,
   loading,
   handleDwdApplicationSubmit,
+  onProviderFirmwareFieldChange,
+  onProviderFirmwareSubmit,
   onNotificationRead,
   onChatDraftChange,
   onSupportMessageSubmit,
@@ -1509,8 +1566,8 @@ function ProviderPage({
           <Radio size={28} />
         </div>
         <p className="empty-state">
-          Укажите город, email для связи и комментарий. После одобрения администратор выберет прошивку
-          и вручную отправит инструкцию на указанную почту.
+          Укажите город, email для связи и комментарий. После одобрения вы сможете сами собрать готовый
+          Arduino-код: сайт подставит station ID, MQTT topic и системные ключи автоматически.
         </p>
         {isAuthenticated ? (
           <>
@@ -1522,7 +1579,13 @@ function ProviderPage({
             />
             <DwdApplicationsList applications={dwdApplications} />
             <NotificationsPanel notifications={notifications} onRead={onNotificationRead} />
-            <ProviderCabinet dashboard={providerDashboard} />
+            <ProviderCabinet
+              dashboard={providerDashboard}
+              firmwareForm={providerFirmwareForm}
+              loading={loading}
+              onFirmwareFieldChange={onProviderFirmwareFieldChange}
+              onFirmwareSubmit={onProviderFirmwareSubmit}
+            />
             {activeApplication && (
               <SupportChat
                 application={activeApplication}
@@ -2021,7 +2084,6 @@ function AdminApplicationsPage({
                 <button className="icon-text-button" type="button" onClick={() => navigate(`/admin-panel/dwd-chat/${application.id}`)}>Чат</button>
                 {application.status === "pending" && <button className="icon-text-button" disabled={loading} type="button" onClick={() => onApprove(application.id)}>Одобрить</button>}
                 {application.status === "pending" && <button className="icon-text-button" disabled={loading} type="button" onClick={() => onReject(application.id)}>Отклонить</button>}
-                {application.status === "approved" && <button className="icon-text-button" disabled={loading} type="button" onClick={() => onPrepareProvisioning(application)}>Прошивка</button>}
               </span>
             </div>
           ))}
@@ -2074,7 +2136,6 @@ function ApplicationDetailCard({
       <div className="row-actions">
         {application.status === "pending" && <button className="primary-button compact-action" disabled={loading} type="button" onClick={() => onApprove(application.id)}>Одобрить заявку</button>}
         {application.status === "pending" && <button className="danger-button compact-danger" disabled={loading} type="button" onClick={() => onReject(application.id)}>Отклонить заявку</button>}
-        {application.status === "approved" && <button className="primary-button compact-action" type="button" onClick={() => onPrepareProvisioning(application)}>Сгенерировать прошивку</button>}
       </div>
       {application.device && <DeviceSummary device={application.device} />}
       <SupportChat
@@ -2113,7 +2174,7 @@ function AdminProvisioningPage({
   return (
     <div className="admin-page-grid">
       <AdminTableCard title="Заявки и решение" icon={<Radio size={20} />}>
-        <p className="empty-state">Здесь весь поток: отклонить заявку, одобрить её или сразу подготовить код прошивки для уже одобренного провайдера.</p>
+        <p className="empty-state">Здесь админ принимает решение по заявке. После одобрения провайдер сам соберёт прошивку в личном кабинете.</p>
         <div className="admin-table admin-table-applications">
           <div className="admin-row admin-row-head">
             <span>ID</span><span>Пользователь</span><span>Email для связи</span><span>Город</span><span>Комментарий</span><span>Статус</span><span>Действия</span>
@@ -2131,23 +2192,17 @@ function AdminProvisioningPage({
                 <button className="icon-text-button" type="button" onClick={() => navigate(`/admin-panel/dwd-chat/${application.id}`)}>Чат</button>
                 {application.status === "pending" && <button className="primary-button compact-action" disabled={loading} type="button" onClick={() => onApprove(application.id)}>Одобрить</button>}
                 {application.status === "pending" && <button className="danger-button compact-danger" disabled={loading} type="button" onClick={() => onReject(application.id)}>Отклонить</button>}
-                {application.status === "approved" && <button className="icon-text-button" disabled={loading} type="button" onClick={() => onPrepareProvisioning(application)}>Подготовить код</button>}
               </span>
             </div>
           ))}
         </div>
       </AdminTableCard>
 
-      <AdminTableCard title="Автогенерация прошивки" icon={<Send size={20} />}>
-        <ProvisioningForm
-          applications={applications}
-          provisioningForm={provisioningForm}
-          loading={loading}
-          onPrepareProvisioning={onPrepareProvisioning}
-          onProvisioningFieldChange={onProvisioningFieldChange}
-          onProvisioningSubmit={onProvisioningSubmit}
-        />
-        <ProvisioningList records={provisioningRecords} loading={loading} onProvisioningSent={onProvisioningSent} showInstruction />
+      <AdminTableCard title="Коды, сгенерированные провайдерами" icon={<Send size={20} />}>
+        <p className="empty-state">
+          Провайдер сам заполняет параметры прошивки в личном кабинете. Системные ключи, station ID и MQTT topic подставляет backend.
+        </p>
+        <ProvisioningList records={provisioningRecords} loading={loading} onProvisioningSent={onProvisioningSent} showInstruction allowMarkSent={false} />
       </AdminTableCard>
     </div>
   );
@@ -2618,7 +2673,7 @@ function ProvisioningForm({ applications, provisioningForm, loading, onPreparePr
   );
 }
 
-function ProvisioningList({ records, loading, onProvisioningSent, showInstruction = false }) {
+function ProvisioningList({ records, loading, onProvisioningSent, showInstruction = false, allowMarkSent = true }) {
   return records.length ? (
     <div className="dwd-list">
       {records.map((record) => (
@@ -2626,13 +2681,13 @@ function ProvisioningList({ records, loading, onProvisioningSent, showInstructio
           <div>
             <strong>{record.firmware_type} {record.firmware_version}</strong>
             <small>{formatUser(record.user)} / {record.device?.city || "устройство не привязано"}</small>
-            <small>Статус: {statusLabel(record.delivery_status)}; отправил: {record.sent_by?.username || "никто"} {record.sent_at ? `· ${formatDate(record.sent_at)}` : ""}</small>
+            <small>Статус: {statusLabel(record.delivery_status)}; сгенерировано: {formatDate(record.code_generated_at || record.updated_at)}</small>
             {showInstruction && <small>{record.instruction_text}</small>}
             {showInstruction && <FirmwareCodeBlock code={record.firmware_code} />}
           </div>
           <div className="row-actions">
             <StatusPill value={record.delivery_status} />
-            {record.delivery_status !== "sent" && record.delivery_status !== "acknowledged" && (
+            {allowMarkSent && record.delivery_status !== "sent" && record.delivery_status !== "acknowledged" && (
               <button className="icon-text-button" type="button" disabled={loading} onClick={() => onProvisioningSent(record.id)}>
                 <Send size={16} />
                 Отправлено
@@ -2951,7 +3006,7 @@ function SupportWidget({
 
 function FirmwareCodeBlock({ code }) {
   if (!code) {
-    return <small>Код прошивки появится после подготовки provisioning.</small>;
+    return <small>Код прошивки появится после генерации.</small>;
   }
   return (
     <div className="firmware-code">
@@ -3035,10 +3090,11 @@ function DwdApplicationsList({ applications }) {
   );
 }
 
-function ProviderCabinet({ dashboard }) {
+function ProviderCabinet({ dashboard, firmwareForm, loading, onFirmwareFieldChange, onFirmwareSubmit }) {
   if (!dashboard) return null;
   const devices = dashboard.devices || [];
   const provisioning = dashboard.provisioning || [];
+  const selectedDeviceId = firmwareForm.device_id || (devices[0]?.id ? String(devices[0].id) : "");
 
   return (
     <div className="dwd-grid two-columns">
@@ -3067,8 +3123,75 @@ function ProviderCabinet({ dashboard }) {
 
       <article className="dwd-card">
         <div className="panel-title">
+          <Settings size={20} />
+          <h3>Собрать прошивку</h3>
+        </div>
+        {devices.length ? (
+          <form className="dwd-form compact-form" onSubmit={onFirmwareSubmit}>
+            <label>
+              <span>Устройство</span>
+              <select
+                value={selectedDeviceId}
+                onChange={(event) => onFirmwareFieldChange("device_id", event.target.value)}
+                required
+              >
+                {devices.map((device) => (
+                  <option key={device.id} value={device.id}>
+                    {device.device_code || device.station_id} / {device.city}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Режим</span>
+              <select value={firmwareForm.firmware_type} onChange={(event) => onFirmwareFieldChange("firmware_type", event.target.value)}>
+                <option value="esp01_wifi">MQTT Wi-Fi</option>
+              </select>
+            </label>
+            <label>
+              <span>Версия</span>
+              <input
+                value={firmwareForm.firmware_version}
+                onChange={(event) => onFirmwareFieldChange("firmware_version", event.target.value)}
+                placeholder="1.0.0"
+              />
+            </label>
+            <label>
+              <span>Wi-Fi сеть</span>
+              <input
+                value={firmwareForm.wifi_ssid}
+                onChange={(event) => onFirmwareFieldChange("wifi_ssid", event.target.value)}
+                placeholder="Например, HomeWiFi"
+                required
+              />
+            </label>
+            <label>
+              <span>Wi-Fi пароль</span>
+              <input
+                type="password"
+                value={firmwareForm.wifi_password}
+                onChange={(event) => onFirmwareFieldChange("wifi_password", event.target.value)}
+                placeholder="Пароль от вашей сети"
+                autoComplete="new-password"
+              />
+            </label>
+            <p className="empty-state wide-field">
+              Station ID, MQTT topic, адрес сервера и ключи доступа сайт подставит сам. Вам не нужно искать или вводить системные параметры.
+            </p>
+            <button className="primary-button" type="submit" disabled={loading || !selectedDeviceId}>
+              {loading ? <RefreshCw className="spin" size={18} /> : <Terminal size={18} />}
+              Сгенерировать код
+            </button>
+          </form>
+        ) : (
+          <p className="empty-state">Генерация откроется после одобрения заявки и создания устройства.</p>
+        )}
+      </article>
+
+      <article className="dwd-card">
+        <div className="panel-title">
           <FileText size={20} />
-          <h3>Инструкции по прошивке</h3>
+          <h3>Ваш Arduino-код</h3>
         </div>
         {provisioning.length ? (
           <div className="dwd-list">
@@ -3076,9 +3199,9 @@ function ProviderCabinet({ dashboard }) {
               <div className="dwd-list-item" key={record.id}>
                 <div>
                   <strong>{record.firmware_type} {record.firmware_version}</strong>
-                  <small>Статус: {statusLabel(record.delivery_status)}</small>
-                  <small>{record.instruction_text}</small>
-                  <small>{record.wifi_configured ? "Wi-Fi уже вписан в код" : "Wi-Fi можно вписать вручную в Arduino IDE"}</small>
+                  <small>Устройство: {record.device?.device_code || record.device?.station_id || "не указано"}</small>
+                  <small>Сгенерировано: {formatDate(record.code_generated_at || record.updated_at)}</small>
+                  <small>{record.wifi_configured ? "Wi-Fi уже вписан в код" : "Wi-Fi ещё не вписан"}</small>
                   <FirmwareCodeBlock code={record.firmware_code} />
                 </div>
                 <StatusPill value={record.delivery_status} />
@@ -3086,7 +3209,7 @@ function ProviderCabinet({ dashboard }) {
             ))}
           </div>
         ) : (
-          <p className="empty-state">Прошивка и инструкция пока не назначены.</p>
+          <p className="empty-state">Код появится здесь после генерации.</p>
         )}
       </article>
     </div>
