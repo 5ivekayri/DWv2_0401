@@ -4,12 +4,15 @@ import os
 import requests
 
 
+DEFAULT_MODEL_NAME = "openai/gpt-4o-mini"
+
+
 class OpenRouterClient:
     url = "https://openrouter.ai/api/v1/chat/completions"
 
     def __init__(self) -> None:
         self.api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-        self.model_name = os.getenv("OPENROUTER_MODEL", "openrouter/free").strip()
+        self.model_name = os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL_NAME).strip() or DEFAULT_MODEL_NAME
 
     def is_enabled(self) -> bool:
         return bool(self.api_key)
@@ -21,6 +24,8 @@ class OpenRouterClient:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "https://dark-weather.local").strip(),
+            "X-Title": os.getenv("OPENROUTER_APP_TITLE", "Dark Weather").strip(),
         }
 
         payload = {
@@ -29,14 +34,14 @@ class OpenRouterClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": 0.7,
-            "max_tokens": 1000,
+            "temperature": 0.25,
+            "max_tokens": 220,
         }
 
         response = requests.post(self.url, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
 
         data = response.json()
-        content = data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"].get("content") or ""
 
         return content.strip(), self.model_name

@@ -18,6 +18,7 @@ from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, OpenApiType
 from server.ai.service import OutfitRecommendationService
 from server.iot.config import get_iot_config, serialize_iot_config
 from server.models import AIOutfitRecommendation, DWDDevice, IoTConfiguration, ProviderHealth, RaceRun, SystemEvent
+from server.ai.quality import clean_recommendation_text
 from server.monitoring import (
     KNOWN_PROVIDERS,
     KNOWN_RACE_PROVIDERS,
@@ -147,7 +148,7 @@ def ai_outfit_to_payload(obj: AIOutfitRecommendation) -> dict:
         "condition": obj.condition,
         "model": obj.model_name,
         "prompt_version": obj.prompt_version,
-        "recommendation": obj.recommendation_text,
+        "recommendation": clean_recommendation_text(obj.recommendation_text) or obj.recommendation_text,
         "created_at": utc_iso(obj.created_at),
     }
 

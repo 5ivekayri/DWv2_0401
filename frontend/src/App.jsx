@@ -175,12 +175,20 @@ function formatNumber(value, digits = 1) {
 
 function cleanRecommendationText(value) {
   if (!value) return "";
-  return String(value)
+  const cleaned = String(value)
     .replace(/<\/?assistant>/gi, "")
     .replace(/<\/?user>/gi, "")
     .replace(/<\/?system>/gi, "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*(assistant|user|system|developer)\s*:\s*/i, "").trim())
+    .filter((line) => line && !/^(user\s+safety|system\s+safety|assistant\s+safety|safety|policy|metadata|status|analysis|confidence)\s*:?/i.test(line))
+    .filter((line) => !/^(safe|unsafe|ok)$/i.test(line))
+    .join(" ")
     .replace(/\s{2,}/g, " ")
     .trim();
+
+  if (!cleaned || /^(safe|unsafe|user safety: safe)$/i.test(cleaned)) return "";
+  return cleaned;
 }
 
 function getErrorMessage(error) {

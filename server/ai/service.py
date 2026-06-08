@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import timezone as dt_timezone
 
 from django.utils import timezone
@@ -10,7 +11,15 @@ from server.ai.prompts import (
     build_system_prompt,
     build_user_prompt,
 )
+from server.ai.quality import (
+    build_fallback_recommendation,
+    clean_recommendation_text,
+    is_recommendation_usable,
+)
 from server.models import AIOutfitRecommendation
+
+
+ai_log = logging.getLogger("server.api")
 
 
 class OutfitRecommendationService:
@@ -21,6 +30,38 @@ class OutfitRecommendationService:
     def get_hour_bucket():
         now = timezone.now().astimezone(dt_timezone.utc)
         return now.replace(minute=0, second=0, microsecond=0)
+
+    def _normalize_recommendation(
+        self,
+        text: str,
+        *,
+        city: str,
+        temperature_c: float,
+        humidity: float,
+        wind_speed_ms: float,
+        precipitation_mm: float,
+        condition: str = "",
+        model_name: str = "",
+    ) -> tuple[str, bool]:
+        cleaned = clean_recommendation_text(text)
+        if is_recommendation_usable(cleaned):
+            return cleaned, False
+
+        fallback = build_fallback_recommendation(
+            city=city,
+            temperature_c=temperature_c,
+            humidity=humidity,
+            wind_speed_ms=wind_speed_ms,
+            precipitation_mm=precipitation_mm,
+            condition=condition,
+        )
+        ai_log.warning(
+            "ai_outfit_quality_fallback city=%s model=%s raw_preview=%s",
+            city,
+            model_name or self.client.model_name,
+            str(text)[:120],
+        )
+        return fallback, True
 
     def get_or_create_recommendation(
         self,
@@ -41,6 +82,19 @@ class OutfitRecommendationService:
             .first()
         )
         if existing:
+            normalized, _ = self._normalize_recommendation(
+                existing.recommendation_text,
+                city=existing.city,
+                temperature_c=existing.temperature_c,
+                humidity=existing.humidity,
+                wind_speed_ms=existing.wind_speed_ms,
+                precipitation_mm=existing.precipitation_mm,
+                condition=existing.condition,
+                model_name=existing.model_name,
+            )
+            if normalized != existing.recommendation_text:
+                existing.recommendation_text = normalized
+                existing.save(update_fields=["recommendation_text"])
             return existing, False
 
         system_prompt = build_system_prompt()
@@ -56,6 +110,16 @@ class OutfitRecommendationService:
         recommendation_text, model_name = self.client.create_completion(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+        )
+        recommendation_text, _ = self._normalize_recommendation(
+            recommendation_text,
+            city=city,
+            temperature_c=temperature_c,
+            humidity=humidity,
+            wind_speed_ms=wind_speed_ms,
+            precipitation_mm=precipitation_mm,
+            condition=condition,
+            model_name=model_name,
         )
 
         obj = AIOutfitRecommendation.objects.create(
@@ -85,6 +149,16 @@ class OutfitRecommendationService:
         recommendation_text, model_name = self.client.create_completion(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+        )
+        recommendation_text, _ = self._normalize_recommendation(
+            recommendation_text,
+            city=obj.city,
+            temperature_c=obj.temperature_c,
+            humidity=obj.humidity,
+            wind_speed_ms=obj.wind_speed_ms,
+            precipitation_mm=obj.precipitation_mm,
+            condition=obj.condition,
+            model_name=model_name,
         )
         obj.recommendation_text = recommendation_text
         obj.model_name = model_name
