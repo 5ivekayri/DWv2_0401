@@ -14,6 +14,7 @@ from server.ai.prompts import (
 from server.ai.quality import (
     build_fallback_recommendation,
     clean_recommendation_text,
+    is_recommendation_consistent_with_weather,
     is_recommendation_usable,
 )
 from server.models import AIOutfitRecommendation
@@ -44,7 +45,12 @@ class OutfitRecommendationService:
         model_name: str = "",
     ) -> tuple[str, bool]:
         cleaned = clean_recommendation_text(text)
-        if is_recommendation_usable(cleaned):
+        if is_recommendation_usable(cleaned) and is_recommendation_consistent_with_weather(
+            cleaned,
+            temperature_c=temperature_c,
+            precipitation_mm=precipitation_mm,
+            condition=condition,
+        ):
             return cleaned, False
 
         fallback = build_fallback_recommendation(

@@ -34,7 +34,7 @@ from server.iot.config import get_iot_config
 from server.iot.mqtt_bridge import MqttArduinoListener, parse_mqtt_message
 from server.iot.serial_bridge import SerialArduinoReader, parse_serial_line
 from server.ai.prompts import PROMPT_VERSION
-from server.ai.quality import clean_recommendation_text, is_recommendation_usable
+from server.ai.quality import clean_recommendation_text, is_recommendation_consistent_with_weather, is_recommendation_usable
 from server.ai.service import OutfitRecommendationService
 from server.weather.contracts import WeatherPoint
 from server.weather.storage import get_hour_bucket, normalize_coordinate
@@ -226,6 +226,18 @@ class WeatherApiTests(TestCase):
         self.assertEqual(cleaned, "")
         self.assertFalse(is_recommendation_usable(cleaned))
 
+    def test_ai_outfit_quality_guard_rejects_weather_hallucination(self):
+        recommendation = "Наденьте тёплую куртку и возьмите зонт на случай дождя."
+
+        self.assertFalse(
+            is_recommendation_consistent_with_weather(
+                recommendation,
+                temperature_c=7.0,
+                precipitation_mm=0.0,
+                condition="cloudy",
+            )
+        )
+
     def test_ai_outfit_service_rewrites_bad_cached_recommendation(self):
         service = OutfitRecommendationService()
         service.client = SimpleNamespace(model_name="test-model")
@@ -276,6 +288,44 @@ class WeatherApiTests(TestCase):
         self.assertTrue(created)
         self.assertNotIn("User Safety", obj.recommendation_text)
         self.assertTrue(is_recommendation_usable(obj.recommendation_text))
+
+    def test_ai_outfit_service_rewrites_inconsistent_cached_recommendation(self):
+        service = OutfitRecommendationService()
+        service.client = SimpleNamespace(model_name="test-model")
+        obj = AIOutfitRecommendation.objects.create(
+            city="Saransk",
+            hour_bucket=service.get_hour_bucket(),
+            temperature_c=7.0,
+            humidity=65.0,
+            wind_speed_ms=3.0,
+            precipitation_mm=0.0,
+            condition="cloudy",
+            model_name="test-model",
+            prompt_version=PROMPT_VERSION,
+            recommendation_text="Наденьте тёплую куртку и возьмите зонт на случай дождя.",
+        )
+
+        result, created = service.get_or_create_recommendation(
+            city="Saransk",
+            temperature_c=7.0,
+            humidity=65.0,
+            wind_speed_ms=3.0,
+            precipitation_mm=0.0,
+            condition="cloudy",
+        )
+
+        obj.refresh_from_db()
+        self.assertFalse(created)
+        self.assertEqual(result.pk, obj.pk)
+        self.assertNotIn("зонт", obj.recommendation_text.lower())
+        self.assertTrue(
+            is_recommendation_consistent_with_weather(
+                obj.recommendation_text,
+                temperature_c=7.0,
+                precipitation_mm=0.0,
+                condition="cloudy",
+            )
+        )
 
     @patch("server.admin_views.OutfitRecommendationService")
     def test_admin_can_list_and_regenerate_ai_outfit_recommendations(self, service_cls):

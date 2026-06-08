@@ -14,6 +14,10 @@ CLOTHING_RE = re.compile(
     r"(надень|одень|куртк|пальто|плащ|ветровк|свитер|худи|футболк|рубашк|брюк|джинс|обув|ботин|кроссов|зонт|шарф|перчат|шапк|сло)",
     re.IGNORECASE,
 )
+WET_WEATHER_ADVICE_RE = re.compile(r"(зонт|дожд|ливн|непромока|намок|мокр|снег|слякот)", re.IGNORECASE)
+WET_CONDITION_RE = re.compile(r"(rain|drizzle|shower|snow|sleet|thunder|дожд|ливн|снег|осад)", re.IGNORECASE)
+TOO_LIGHT_FOR_COLD_RE = re.compile(r"(шорт|майк|футболк|сандал|сланц)", re.IGNORECASE)
+TOO_HEAVY_FOR_WARM_RE = re.compile(r"(пуховик|зимн|перчат|шапк|термобель)", re.IGNORECASE)
 
 
 def _extract_json_text(value: str) -> str:
@@ -67,6 +71,29 @@ def is_recommendation_usable(value: str) -> bool:
         return False
     if not CLOTHING_RE.search(value) and len(value) < 90:
         return False
+    return True
+
+
+def is_recommendation_consistent_with_weather(
+    value: str,
+    *,
+    temperature_c: float,
+    precipitation_mm: float,
+    condition: str = "",
+) -> bool:
+    if not value:
+        return False
+
+    has_wet_weather = float(precipitation_mm) > 0 or bool(WET_CONDITION_RE.search(condition or ""))
+    if not has_wet_weather and WET_WEATHER_ADVICE_RE.search(value):
+        return False
+
+    temp = float(temperature_c)
+    if temp <= 8 and TOO_LIGHT_FOR_COLD_RE.search(value):
+        return False
+    if temp >= 22 and TOO_HEAVY_FOR_WARM_RE.search(value):
+        return False
+
     return True
 
 
